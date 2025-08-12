@@ -3,7 +3,7 @@ import os
 import logging
 log = logging.getLogger(__name__)
 log.info(f"API key length: {len(os.getenv('BINANCE_API_KEY',''))}, secret length: {len(os.getenv('BINANCE_API_SECRET',''))}")
-
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Request, Body
 from pydantic import BaseModel, field_validator
 from binance_client import BinanceFutures
@@ -50,7 +50,7 @@ class ManualPayload(BaseModel):
         return v2
 
 class ClosePayload(BaseModel):
-    symbol: str | None = None
+    side: Optional[str] = None  # можно не передавать
 
 def build_manager(symbol: str, qty_default: float) -> OrderManager:
     filters = parse_symbol_filters(_exchange_info, symbol)
@@ -122,27 +122,33 @@ def manual_trade(payload: ManualPayload):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/trade/close")
-def close_position(payload: ClosePayload):
-    symbol = (payload.symbol or SYMBOL_DEFAULT).upper()
-
-    # (не обязательно, но не повредит)
-    try:
-        client.set_margin_type_isolated(symbol)
-    except Exception:
-        pass
-    try:
-        client.set_leverage(symbol, LEVERAGE_DEFAULT)
-    except Exception:
-        pass
-
+def close_position(payload: Optional[ClosePayload] = None):
+    """
+    Закрывает текущую открытую позицию по SYMBOL_DEFAULT
+    (или можно расширить на symbol из payload, если понадобится).
+    """
+    symbol = SYMBOL_DEFAULT.upper()
     om = build_manager(symbol, QTY_DEFAULT)
 
-    # Определяем текущую позицию и направление закрытия
-    pos_amt = om.get_position_amt()
+    try:
+        pos_amt = om.get_position_amt()
+        log.info(f"[CLOSE] позиция по {symbol}: {pos_amt}")
+    except Exception as e:
+        log.exception("Failed to get position amount")
+        raise HTTPException(status_code=500, detail=str(e))
+
     if pos_amt == 0:
         return {"status": "ok", "symbol": symbol, "result": {"closed": False, "info": "already flat"}}
 
-    # если >0 (лонг) — хотим закрыть SELL; если <0 (шорт) — хотим закрыть BUY
+    # Если пользователь попросил закрыть только long/short — проверим соответствие
+    if payload and payload.side:
+        want = payload.side.lower()
+        if want == "long" and pos_amt <= 0:
+            return {"status": "ok", "symbol": symbol, "result": {"closed": False, "info": "no such position (not long)"}}
+        if want == "short" and pos_amt >= 0:
+            return {"status": "ok", "symbol": symbol, "result": {"closed": False, "info": "no such position (not short)"}}
+
+    # Авто-сторона для закрытия: лонг -> SELL, шорт -> BUY
     side_for_close = "SELL" if pos_amt > 0 else "BUY"
 
     try:
@@ -151,6 +157,7 @@ def close_position(payload: ClosePayload):
     except Exception as e:
         log.exception("close_position failed")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 if __name__ == "__main__":

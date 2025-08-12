@@ -70,6 +70,32 @@ class BinanceFutures:
             data = [x for x in data if x["symbol"] == symbol]
         return data
 
+    def get_positions(self, symbol: str):
+        """
+        Универсально получить позиции по символу.
+        Пробуем разные имена методов у UMFutures,
+        в крайнем случае читаем из account()['positions'].
+        Возвращает список позиций (как минимум с полями symbol, positionAmt).
+        """
+        sym = symbol.upper()
+
+        # 1) Пробуем прямые методы разных версий
+        for name in ("position_risk", "position_information", "futures_position_information"):
+            m = getattr(self.client, name, None)
+            if callable(m):
+                return m(symbol=sym)
+
+        # 2) Фолбэк: берём все позиции из account()
+        acc = getattr(self.client, "account", None)
+        if callable(acc):
+            data = acc() or {}
+            pos = data.get("positions", [])
+            # Вернём только нужный символ (в формате, схожем с position_risk)
+            return [p for p in pos if str(p.get("symbol", "")).upper() == sym]
+
+        # Если ничего не нашли — явно падаем, чтобы в логах было видно
+        raise AttributeError("Positions endpoint not found on UMFutures (tried: position_risk, position_information, futures_position_information, account)")
+
     # --- Helpers ---
     @staticmethod
     def is_filled(status: str) -> bool:

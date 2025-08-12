@@ -4,7 +4,8 @@ from typing import Literal, Dict, Any
 from binance.error import ClientError
 from binance_client import BinanceFutures
 from utils import round_to_step, parse_symbol_filters
-
+import logging
+log = logging.getLogger("order_manager")
 Side = Literal["BUY", "SELL"]
 
 class OrderManager:
@@ -49,11 +50,19 @@ class OrderManager:
 
     # -------- Opposite position handling --------
     def get_position_amt(self) -> float:
-        pr = self.client.position_risk(self.symbol)
-        if not pr:
+        try:
+            positions = self.client.get_positions(self.symbol.upper())
+            log.debug(f"[positions] {self.symbol.upper()} -> {positions}")
+            for p in positions or []:
+                if str(p.get("symbol","")).upper() == self.symbol.upper():
+                    return float(p.get("positionAmt", 0) or 0)
             return 0.0
-        pos_amt = float(pr[0]["positionAmt"])  # >0 long, <0 short, 0 flat
-        return pos_amt
+        except Exception as e:
+            log.error(f"[ERROR] Не удалось получить позиции: {e}", exc_info=True)
+            raise
+
+
+
 
     def close_opposite_if_any(self, side: Side):
         """
@@ -186,30 +195,6 @@ class OrderManager:
             return amt >= need
         else:  # "SELL"
             return -amt >= need
-
-
-    # def _has_position(self, side: str, target_qty: float) -> bool:
-    #     """
-    #     Проверяет, есть ли уже открытая позиция на нужной стороне и с объёмом >= target_qty.
-    #     """
-    #     try:
-    #         positions = self.client.futures_position_information(symbol=self.symbol)
-    #     except Exception as e:
-    #         print(f"[ERROR] Failed to fetch positions: {e}")
-    #         return False
-
-    #     for pos in positions:
-    #         amt = float(pos["positionAmt"])
-    #         if amt == 0:
-    #             continue
-    #         # Лонг
-    #         if side.upper() == "BUY" and amt > 0 and abs(amt) >= target_qty:
-    #             return True
-    #         # Шорт
-    #         if side.upper() == "SELL" and amt < 0 and abs(amt) >= target_qty:
-    #             return True
-    #     return False
-
 
 
     # -------- High-level: flip if needed, then open --------
