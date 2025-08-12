@@ -4,13 +4,13 @@ import logging
 log = logging.getLogger(__name__)
 log.info(f"API key length: {len(os.getenv('BINANCE_API_KEY',''))}, secret length: {len(os.getenv('BINANCE_API_SECRET',''))}")
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Body
 from pydantic import BaseModel, field_validator
 from binance_client import BinanceFutures
 from order_manager import OrderManager
 from utils import parse_symbol_filters
 from config import (
-    SYMBOL_DEFAULT, QTY_DEFAULT, LEVERAGE_DEFAULT, ORDER_TIMEOUT_MS, MAX_RETRIES,
+    SYMBOL_DEFAULT, QTY_DEFAULT, LEVERAGE_DEFAULT, ORDER_TIMEOUT_MS, MAX_RETRIES, CLOSE_TIMEOUT_MS,
     TV_WEBHOOK_SECRET, LOG_LEVEL, PORT, HEDGE_MODE
 )
 import uvicorn
@@ -49,6 +49,9 @@ class ManualPayload(BaseModel):
             raise ValueError("side must be 'long' or 'short'")
         return v2
 
+class ClosePayload(BaseModel):
+    symbol: str | None = None
+
 def build_manager(symbol: str, qty_default: float) -> OrderManager:
     filters = parse_symbol_filters(_exchange_info, symbol)
     om = OrderManager(
@@ -58,7 +61,8 @@ def build_manager(symbol: str, qty_default: float) -> OrderManager:
         tick_size=filters["tickSize"],
         step_size=filters["stepSize"],
         order_timeout_ms=ORDER_TIMEOUT_MS,
-        max_retries=MAX_RETRIES
+        max_retries=MAX_RETRIES,
+        close_timeout_ms=CLOSE_TIMEOUT_MS,
     )
     return om
 
@@ -116,6 +120,38 @@ def manual_trade(payload: ManualPayload):
     except Exception as e:
         log.exception("manual execute_signal failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/trade/close")
+def close_position(payload: ClosePayload):
+    symbol = (payload.symbol or SYMBOL_DEFAULT).upper()
+
+    # (не обязательно, но не повредит)
+    try:
+        client.set_margin_type_isolated(symbol)
+    except Exception:
+        pass
+    try:
+        client.set_leverage(symbol, LEVERAGE_DEFAULT)
+    except Exception:
+        pass
+
+    om = build_manager(symbol, QTY_DEFAULT)
+
+    # Определяем текущую позицию и направление закрытия
+    pos_amt = om.get_position_amt()
+    if pos_amt == 0:
+        return {"status": "ok", "symbol": symbol, "result": {"closed": False, "info": "already flat"}}
+
+    # если >0 (лонг) — хотим закрыть SELL; если <0 (шорт) — хотим закрыть BUY
+    side_for_close = "SELL" if pos_amt > 0 else "BUY"
+
+    try:
+        result = om.close_opposite_if_any(side_for_close)
+        return {"status": "ok", "symbol": symbol, "result": result}
+    except Exception as e:
+        log.exception("close_position failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)

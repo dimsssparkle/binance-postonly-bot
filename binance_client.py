@@ -49,8 +49,13 @@ class BinanceFutures:
     def cancel_order(self, symbol: str, order_id: int | None = None, orig_client_order_id: str | None = None):
         return self.client.cancel_order(symbol=symbol, orderId=order_id, origClientOrderId=orig_client_order_id)
 
-    def get_order(self, symbol: str, order_id: int | None = None, orig_client_order_id: str | None = None):
-        return self.client.get_order(symbol=symbol, orderId=order_id, origClientOrderId=orig_client_order_id)
+    def get_order(self, symbol, order_id=None, orig_client_order_id=None):
+        return self.client.query_order(
+            symbol=symbol,
+            orderId=order_id,
+            origClientOrderId=orig_client_order_id
+        )
+
 
     def book_ticker(self, symbol: str) -> Dict[str, Any]:
         """

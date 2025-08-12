@@ -17,6 +17,7 @@ QTY_DEFAULT = float(os.getenv("QTY_DEFAULT", "0.01"))
 LEVERAGE_DEFAULT = int(os.getenv("LEVERAGE_DEFAULT", "10"))
 ORDER_TIMEOUT_MS = int(os.getenv("ORDER_TIMEOUT_MS", "200"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "25"))  # 25 * 200ms ≈ 5 сек
+CLOSE_TIMEOUT_MS = int(os.getenv("CLOSE_TIMEOUT_MS", "2500"))
 HEDGE_MODE = os.getenv("HEDGE_MODE", "off")  # "off" (one-way) или "on"
 
 # Безопасность вебхука TradingView (рекомендуется)
