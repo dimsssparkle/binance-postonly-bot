@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: binance-postonly-bot
+    runtime: python
+    repo: https://github.com/<your-username>/binance-postonly-bot
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_API_SECRET
+        sync: false
+      - key: BINANCE_BASE_URL
+        value: https://fapi.binance.com
+      - key: SYMBOL_DEFAULT
+        value: ETHUSDT
+      - key: QTY_DEFAULT
+        value: "0.01"
+      - key: LEVERAGE_DEFAULT
+        value: "10"
+      - key: ORDER_TIMEOUT_MS
+        value: "200"
+      - key: MAX_RETRIES
+        value: "25"
+      - key: HEDGE_MODE
+        value: off
+      - key: TV_WEBHOOK_SECRET
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
