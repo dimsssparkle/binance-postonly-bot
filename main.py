@@ -14,6 +14,7 @@ from config import (
     TV_WEBHOOK_SECRET, LOG_LEVEL, PORT, HEDGE_MODE
 )
 import uvicorn
+import json
 
 logging.basicConfig(level=LOG_LEVEL)
 log = logging.getLogger("app")
@@ -65,6 +66,70 @@ def build_manager(symbol: str, qty_default: float) -> OrderManager:
         close_timeout_ms=CLOSE_TIMEOUT_MS,
     )
     return om
+
+@app.post("/webhook/{secret}")
+async def tv_webhook_path(secret: str, request: Request):
+    if TV_WEBHOOK_SECRET and secret != TV_WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="bad secret")
+
+    data = await request.json()
+    side = (data.get("side") or "").lower()
+    symbol = (data.get("symbol") or SYMBOL_DEFAULT).upper()
+    if side not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="side must be 'long' or 'short'")
+
+    try:
+        client.set_margin_type_isolated(symbol)
+    except Exception:
+        pass
+    try:
+        client.set_leverage(symbol, LEVERAGE_DEFAULT)
+    except Exception:
+        pass
+
+    om = build_manager(symbol, QTY_DEFAULT)
+    result = om.execute_signal(side)
+    return {"status": "ok", "symbol": symbol, "action": side, "result": result}
+
+
+@app.post("/webhook")
+async def tv_webhook_query(request: Request, secret: Optional[str] = None):
+    if TV_WEBHOOK_SECRET and secret != TV_WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="bad secret")
+
+    raw = await request.body()
+    payload = {}
+    if raw:
+        body_text = raw.decode("utf-8")
+        try:
+            payload = json.loads(body_text)
+        except json.JSONDecodeError:
+            # поддержка text/plain вида: "side: long\nsymbol: ETHUSDT"
+            for line in body_text.splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    payload[k.strip()] = v.strip()
+
+    side = (payload.get("side") or "").lower()
+    symbol = (payload.get("symbol") or SYMBOL_DEFAULT).upper()
+    if side not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="side must be 'long' or 'short'")
+
+    try:
+        client.set_margin_type_isolated(symbol)
+    except Exception:
+        pass
+    try:
+        client.set_leverage(symbol, LEVERAGE_DEFAULT)
+    except Exception:
+        pass
+
+    om = build_manager(symbol, QTY_DEFAULT)
+    result = om.execute_signal(side)
+    return {"status": "ok", "symbol": symbol, "action": side, "result": result}
+
+
+
 
 @app.on_event("startup")
 def _init():
@@ -158,6 +223,29 @@ def close_position(payload: Optional[ClosePayload] = None):
         log.exception("close_position failed")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/webhook/{secret}")
+async def tv_webhook_path(secret: str, request: Request):
+    if TV_WEBHOOK_SECRET and secret != TV_WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="bad secret")
+
+    data = await request.json()
+    side = (data.get("side") or "").lower()
+    symbol = (data.get("symbol") or SYMBOL_DEFAULT).upper()
+    if side not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="side must be 'long' or 'short'")
+
+    try:
+        client.set_margin_type_isolated(symbol)
+    except Exception:
+        pass
+    try:
+        client.set_leverage(symbol, LEVERAGE_DEFAULT)
+    except Exception:
+        pass
+
+    om = build_manager(symbol, QTY_DEFAULT)
+    result = om.execute_signal(side)
+    return {"status": "ok", "symbol": symbol, "action": side, "result": result}
 
 
 if __name__ == "__main__":

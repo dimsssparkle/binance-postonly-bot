@@ -61,9 +61,6 @@ class OrderManager:
             log.error(f"[ERROR] Не удалось получить позиции: {e}", exc_info=True)
             raise
 
-
-
-
     def close_opposite_if_any(self, side: Side):
         """
         Закрываем встречную позицию reduceOnly post-only.
