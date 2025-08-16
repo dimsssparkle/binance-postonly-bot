@@ -46,6 +46,21 @@ class BinanceFutures:
             newClientOrderId=new_client_order_id
         )
 
+    def place_market(self, symbol: str, side: str, qty: str,
+                     reduce_only: bool = False, new_client_order_id: Optional[str] = None):
+        """
+        Маркет-ордер. Для закрытия позиции используем reduceOnly=True.
+        """
+        return self.client.new_order(
+            symbol=symbol,
+            side=side,
+            type="MARKET",
+            quantity=qty,
+            reduceOnly=reduce_only,
+            newClientOrderId=new_client_order_id
+        )
+
+
     def cancel_order(self, symbol: str, order_id: int | None = None, orig_client_order_id: str | None = None):
         return self.client.cancel_order(symbol=symbol, orderId=order_id, origClientOrderId=orig_client_order_id)
 
@@ -65,10 +80,17 @@ class BinanceFutures:
 
     # --- Positions / PnL ---
     def position_risk(self, symbol: str | None = None):
-        data = self.client.get_position_risk()
+        m = getattr(self.client, "get_position_risk", None) or getattr(self.client, "position_risk", None)
+        if not callable(m):
+            raise AttributeError("UMFutures has no position_risk/get_position_risk")
+        try:
+            data = m() if symbol is None else m(symbol=symbol)
+        except TypeError:
+            data = m()
         if symbol:
-            data = [x for x in data if x["symbol"] == symbol]
+            data = [x for x in data if str(x.get("symbol", "")).upper() == symbol.upper()]
         return data
+
 
     def get_positions(self, symbol: str):
         """
@@ -80,21 +102,30 @@ class BinanceFutures:
         sym = symbol.upper()
 
         # 1) Пробуем прямые методы разных версий
-        for name in ("position_risk", "position_information", "futures_position_information"):
+        for name in ("get_position_risk", "position_risk", "position_information", "futures_position_information"):
             m = getattr(self.client, name, None)
             if callable(m):
-                return m(symbol=sym)
+                try:
+                    # Некоторые реализации не принимают symbol и возвращают всё.
+                    data = m(symbol=sym) if "symbol" in getattr(m, "__code__", None).co_varnames else m()
+                except TypeError:
+                    data = m()
+                # Нормализуем к списку по symbol
+                if isinstance(data, dict):
+                    data = [data]
+                return [p for p in (data or []) if str(p.get("symbol", "")).upper() == sym]
 
         # 2) Фолбэк: берём все позиции из account()
         acc = getattr(self.client, "account", None)
         if callable(acc):
             data = acc() or {}
             pos = data.get("positions", [])
-            # Вернём только нужный символ (в формате, схожем с position_risk)
             return [p for p in pos if str(p.get("symbol", "")).upper() == sym]
 
-        # Если ничего не нашли — явно падаем, чтобы в логах было видно
-        raise AttributeError("Positions endpoint not found on UMFutures (tried: position_risk, position_information, futures_position_information, account)")
+        raise AttributeError(
+            "Positions endpoint not found on UMFutures "
+            "(tried: get_position_risk, position_risk, position_information, futures_position_information, account)"
+        )
 
     # --- Helpers ---
     @staticmethod

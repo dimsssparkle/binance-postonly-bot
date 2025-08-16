@@ -61,72 +61,46 @@ class OrderManager:
             log.error(f"[ERROR] Не удалось получить позиции: {e}", exc_info=True)
             raise
 
-    def close_opposite_if_any(self, side: Side):
-        """
-        Закрываем встречную позицию reduceOnly post-only.
-        - Джойнимся к лучшей цене, чтобы поймать встречные рыночные агрессоры.
-        - Учитываем частичное исполнение: после каждой попытки переизмеряем позицию
-          и добираем остаток, пока не станет 0.
-        """
-        def remaining_qty() -> float:
-            amt = self.get_position_amt()
-            need_close = (side == "BUY" and amt < 0) or (side == "SELL" and amt > 0)
-            return abs(amt) if need_close else 0.0
+    def execute_signal(self, side_str: str, qty: float | None = None, spam_mode: bool = False):
+        side: Side = "BUY" if side_str.lower() == "long" else "SELL"
 
-        # Быстрый выход, если закрывать нечего
-        rem = remaining_qty()
-        if rem == 0.0:
-            return {"closed": False, "info": "no opposite position"}
-
-        attempts = 0
-        step = float(self.step_size)
-
-        while attempts < self.max_retries:
-            rem = remaining_qty()
-            if rem <= step / 2:
-                return {"closed": True, "attempts": attempts, "info": "position flat"}
-
-            attempts += 1
-            close_side: Side = "BUY" if (side == "BUY") else "SELL"
-            # Если нам нужно BUY для закрытия (то есть была шорт‑позиция), close_side=BUY; если открываем SELL — закрываем лонг SELL.
-            # На самом деле совпадает с 'side' для открытия противоположного, т.к. мы сначала закрываем старую.
-
-            qty = round_to_step(rem, self.step_size)
-            price = self.maker_price(close_side)
-            cid = f"close-{uuid.uuid4().hex[:10]}"
-
+        if spam_mode:
+            # Быстро закрыть и открыть рыночным
             try:
-                self.client.place_limit_post_only(
-                    self.symbol, close_side, qty, price, reduce_only=True, new_client_order_id=cid
-                )
-            except ClientError:
-                # Например, "would be immediately match" — подождём и репрайснем
-                time.sleep(self.order_timeout_ms / 1000)
-                continue
-
-            # Даём немного больше времени на fill при закрытии (x2 таймаута)
-            deadline = self.client.now_ms() + self.close_timeout_ms
-            filled_enough = False
-
-            while self.client.now_ms() < deadline:
-                # Периодически переизмеряем остаток позиции — это надёжнее, чем статус ордера (из‑за partial)
-                if remaining_qty() <= step / 2:
-                    filled_enough = True
-                    break
-                time.sleep(0.05)
-
-            if filled_enough:
-                return {"closed": True, "attempts": attempts, "info": "position flat"}
-
-            # Иначе отменяем ордер и пробуем снова с новым прайсом
-            try:
-                self.client.cancel_order(self.symbol, orig_client_order_id=cid)
+                self.close_opposite_if_any(side)
             except Exception:
-                pass
+                try:
+                    self.close_market(side)
+                except Exception:
+                    pass
 
-            time.sleep(self.order_timeout_ms / 1000)
+            res = self.open_market(side, qty=qty)
+            return res | {"mode": "market"}
+        else:
+            # Тихий режим: пост-онли
+            self.close_opposite_if_any(side)
+            res = self.open_postonly_maker(side, qty=qty)
+            return res | {"mode": "post-only"}
 
-        raise RuntimeError("Failed to close opposite position in time")
+
+
+    # -------- Market helpers (для шумных режимов) --------
+    def close_market(self, side: Side):
+        """
+        Быстро закрыть встречную позицию рыночным reduceOnly.
+        side=BUY закрывает шорт; side=SELL закрывает лонг.
+        """
+        rem = abs(self.get_position_amt())
+        if rem <= 0:
+            return {"closed": False, "info": "flat"}
+        q = round_to_step(rem, self.step_size)
+        self.client.place_market(self.symbol, side, q, reduce_only=True)
+        return {"closed": True, "info": "market close", "qty": q}
+
+    def open_market(self, side: Side, qty: float | None = None):
+        q = self.norm_qty(qty)
+        self.client.place_market(self.symbol, side, q, reduce_only=False)
+        return {"filled": True, "price": None, "clientOrderId": None, "mode": "market"}
 
 
     # -------- Open maker order with rapid reprice loop --------
@@ -193,11 +167,85 @@ class OrderManager:
         else:  # "SELL"
             return -amt >= need
 
+    def close_opposite_if_any(self, side: Side):
+        """
+        Закрываем встречную позицию reduceOnly post-only.
+        Если пост-онли отклонён кодом -5022 (пересечение с рынком), мгновенно бьём MARKET reduceOnly.
+        Учитываем частичное исполнение — после каждой попытки перепроверяем остаток позиции.
+        """
+        def remaining_qty() -> float:
+            amt = self.get_position_amt()
+            need_close = (side == "BUY" and amt < 0) or (side == "SELL" and amt > 0)
+            return abs(amt) if need_close else 0.0
 
-    # -------- High-level: flip if needed, then open --------
-    def execute_signal(self, side_str: str, qty: float | None = None):
-        side: Side = "BUY" if side_str.lower() == "long" else "SELL"
-        # 1) Закрыть противоположную позицию, если есть
-        self.close_opposite_if_any(side)
-        # 2) Открыть новую post-only
-        return self.open_postonly_maker(side, qty=qty)
+        # Быстрый выход: закрывать нечего
+        rem = remaining_qty()
+        if rem == 0.0:
+            return {"closed": False, "info": "no opposite position"}
+
+        attempts = 0
+        step = float(self.step_size)
+
+        while attempts < self.max_retries:
+            rem = remaining_qty()
+            if rem <= step / 2:
+                return {"closed": True, "attempts": attempts, "info": "position flat"}
+
+            attempts += 1
+            close_side: Side = "BUY" if (side == "BUY") else "SELL"  # совпадает со стороной нового открытия
+            qty = round_to_step(rem, self.step_size)
+            price = self.maker_price(close_side)
+            cid = f"close-{uuid.uuid4().hex[:10]}"
+
+            try:
+                # Пытаемся закрыть пост-онли, чтобы не платить таксу за агрессию
+                self.client.place_limit_post_only(
+                    self.symbol, close_side, qty, price, reduce_only=True, new_client_order_id=cid
+                )
+            except ClientError as e:
+                # -5022: пост-онли отклонён (пересечение с рынком) — закрываемся маркетом, ждать нельзя
+                if getattr(e, "error_code", None) == -5022:
+                    log.warning(f"[CLOSE] Post-only rejected (-5022). Fallback MARKET reduceOnly. side={close_side}, qty={qty}")
+                    mcid = f"close-mkt-{uuid.uuid4().hex[:10]}"
+                    try:
+                        self.client.place_market(
+                            self.symbol, close_side, qty, reduce_only=True, new_client_order_id=mcid
+                        )
+                        deadline_mkt = self.client.now_ms() + int(self.close_timeout_ms * 0.5)
+                        while self.client.now_ms() < deadline_mkt:
+                            if remaining_qty() <= step / 2:
+                                return {"closed": True, "attempts": attempts, "info": "position flat (market fallback)"}
+                            time.sleep(0.05)
+                        # если вдруг недосхлопнулось из-за шага — продолжим цикл
+                        time.sleep(self.order_timeout_ms / 1000)
+                        continue
+                    except Exception:
+                        # даже если маркет внезапно не прошёл, попробуем ещё цикл
+                        time.sleep(self.order_timeout_ms / 1000)
+                        continue
+
+                # Любые другие ошибки — подождём и перепрайснем
+                time.sleep(self.order_timeout_ms / 1000)
+                continue
+
+            # Если пост-онли поставился, ждём схлопывания позиции (проверяем по факту позиции)
+            deadline = self.client.now_ms() + self.close_timeout_ms
+            filled_enough = False
+            while self.client.now_ms() < deadline:
+                if remaining_qty() <= step / 2:
+                    filled_enough = True
+                    break
+                time.sleep(0.05)
+
+            if filled_enough:
+                return {"closed": True, "attempts": attempts, "info": "position flat"}
+
+            # Не успели — отменим ордер и перепрайсим
+            try:
+                self.client.cancel_order(self.symbol, orig_client_order_id=cid)
+            except Exception:
+                pass
+
+            time.sleep(self.order_timeout_ms / 1000)
+
+        raise RuntimeError("Failed to close opposite position in time")

@@ -16,6 +16,8 @@ from config import (
 import uvicorn
 import json
 
+from signal_router import SignalRouter
+
 logging.basicConfig(level=LOG_LEVEL)
 log = logging.getLogger("app")
 
@@ -23,6 +25,14 @@ app = FastAPI(title="Binance Post-Only Bot", version="1.0.0")
 
 client = BinanceFutures()
 _exchange_info = client.exchange_info()  # кэшируем filters
+
+router = SignalRouter(
+    W=int(os.getenv("SPAM_WINDOW_SEC", 90)),
+    N=int(os.getenv("SPAM_COUNT", 4)),
+    F=int(os.getenv("SPAM_FLIPS", 3)),
+    T_hold=int(os.getenv("SPAM_MIN_HOLD_SEC", 30)),
+    H=int(os.getenv("SPAM_HYSTERESIS_SEC", 60)),
+)
 
 class TVPayload(BaseModel):
     symbol: str | None = None
@@ -67,6 +77,16 @@ def build_manager(symbol: str, qty_default: float) -> OrderManager:
     )
     return om
 
+def ensure_symbol_setup(symbol: str) -> None:
+    try:
+        client.set_margin_type_isolated(symbol)
+    except Exception:
+        pass
+    try:
+        client.set_leverage(symbol, LEVERAGE_DEFAULT)
+    except Exception:
+        pass
+
 @app.post("/webhook/{secret}")
 async def tv_webhook_path(secret: str, request: Request):
     if TV_WEBHOOK_SECRET and secret != TV_WEBHOOK_SECRET:
@@ -78,18 +98,20 @@ async def tv_webhook_path(secret: str, request: Request):
     if side not in ("long", "short"):
         raise HTTPException(status_code=400, detail="side must be 'long' or 'short'")
 
-    try:
-        client.set_margin_type_isolated(symbol)
-    except Exception:
-        pass
-    try:
-        client.set_leverage(symbol, LEVERAGE_DEFAULT)
-    except Exception:
-        pass
+    ensure_symbol_setup(symbol)
+
+    router.register(side)
+    spam = router.in_spam()
 
     om = build_manager(symbol, QTY_DEFAULT)
-    result = om.execute_signal(side)
-    return {"status": "ok", "symbol": symbol, "action": side, "result": result}
+    try:
+        result = om.execute_signal(side, qty=None, spam_mode=spam)
+        if result.get("filled"):
+            router.start_opened()
+        return {"status": "ok", "symbol": symbol, "action": side, "mode": result.get("mode"), "result": result}
+    except Exception as e:
+        log.exception("webhook_path execute_signal failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/webhook")
@@ -104,7 +126,6 @@ async def tv_webhook_query(request: Request, secret: Optional[str] = None):
         try:
             payload = json.loads(body_text)
         except json.JSONDecodeError:
-            # поддержка text/plain вида: "side: long\nsymbol: ETHUSDT"
             for line in body_text.splitlines():
                 if ":" in line:
                     k, v = line.split(":", 1)
@@ -115,19 +136,20 @@ async def tv_webhook_query(request: Request, secret: Optional[str] = None):
     if side not in ("long", "short"):
         raise HTTPException(status_code=400, detail="side must be 'long' or 'short'")
 
-    try:
-        client.set_margin_type_isolated(symbol)
-    except Exception:
-        pass
-    try:
-        client.set_leverage(symbol, LEVERAGE_DEFAULT)
-    except Exception:
-        pass
+    ensure_symbol_setup(symbol)
+
+    router.register(side)
+    spam = router.in_spam()
 
     om = build_manager(symbol, QTY_DEFAULT)
-    result = om.execute_signal(side)
-    return {"status": "ok", "symbol": symbol, "action": side, "result": result}
-
+    try:
+        result = om.execute_signal(side, qty=None, spam_mode=spam)
+        if result.get("filled"):
+            router.start_opened()
+        return {"status": "ok", "symbol": symbol, "action": side, "mode": result.get("mode"), "result": result}
+    except Exception as e:
+        log.exception("webhook_query execute_signal failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
@@ -158,10 +180,22 @@ def tv_webhook(payload: TVPayload):
     except Exception:
         pass
 
+    # регистрируем сигнал в маршрутизаторе и решаем режим
+    router.register(payload.side)
+    spam = router.in_spam()
+
     om = build_manager(symbol, QTY_DEFAULT)
     try:
-        result = om.execute_signal(payload.side)
-        return {"status": "ok", "symbol": symbol, "action": payload.side, "result": result}
+        result = om.execute_signal(payload.side, qty=None, spam_mode=spam)
+        if result.get("filled"):
+            router.start_opened()
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "action": payload.side,
+            "mode": result.get("mode"),
+            "result": result
+        }
     except Exception as e:
         log.exception("execute_signal failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -178,10 +212,21 @@ def manual_trade(payload: ManualPayload):
     except Exception:
         pass
 
+    router.register(payload.side)
+    spam = router.in_spam()
+
     om = build_manager(symbol, payload.qty or QTY_DEFAULT)
     try:
-        result = om.execute_signal(payload.side, qty=payload.qty)
-        return {"status": "ok", "symbol": symbol, "action": payload.side, "result": result}
+        result = om.execute_signal(payload.side, qty=payload.qty, spam_mode=spam)
+        if result.get("filled"):
+            router.start_opened()
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "action": payload.side,
+            "mode": result.get("mode"),
+            "result": result
+        }
     except Exception as e:
         log.exception("manual execute_signal failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -222,31 +267,6 @@ def close_position(payload: Optional[ClosePayload] = None):
     except Exception as e:
         log.exception("close_position failed")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/webhook/{secret}")
-async def tv_webhook_path(secret: str, request: Request):
-    if TV_WEBHOOK_SECRET and secret != TV_WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="bad secret")
-
-    data = await request.json()
-    side = (data.get("side") or "").lower()
-    symbol = (data.get("symbol") or SYMBOL_DEFAULT).upper()
-    if side not in ("long", "short"):
-        raise HTTPException(status_code=400, detail="side must be 'long' or 'short'")
-
-    try:
-        client.set_margin_type_isolated(symbol)
-    except Exception:
-        pass
-    try:
-        client.set_leverage(symbol, LEVERAGE_DEFAULT)
-    except Exception:
-        pass
-
-    om = build_manager(symbol, QTY_DEFAULT)
-    result = om.execute_signal(side)
-    return {"status": "ok", "symbol": symbol, "action": side, "result": result}
-
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
