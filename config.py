@@ -25,3 +25,7 @@ TV_WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 PORT = int(os.getenv("PORT", "8000"))
+
+# ---- TP/SL config ----
+TP_PCT = float(os.getenv("TP_PCT", "0.0"))  # 0.0 = выключено
+SL_PCT = float(os.getenv("SL_PCT", "0.0"))  # 0.0 = выключено

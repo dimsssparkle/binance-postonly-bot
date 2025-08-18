@@ -20,7 +20,6 @@ class BinanceFutures:
         try:
             return self.client.change_margin_type(symbol=symbol, marginType="ISOLATED")
         except ClientError as e:
-            # Если уже ISOLATED — вернёт ошибку -4046. Игнорируем.
             if getattr(e, "error_code", None) == -4046:
                 return {"ignored": True}
             raise
@@ -31,15 +30,11 @@ class BinanceFutures:
     # --- Order placement ---
     def place_limit_post_only(self, symbol: str, side: str, qty: str, price: str,
                               reduce_only: bool = False, new_client_order_id: Optional[str] = None):
-        """
-        side: BUY/SELL
-        timeInForce=GTX — post-only
-        """
         return self.client.new_order(
             symbol=symbol,
             side=side,
             type="LIMIT",
-            timeInForce="GTX",
+            timeInForce="GTX",   # post-only
             quantity=qty,
             price=price,
             reduceOnly=reduce_only,
@@ -48,9 +43,6 @@ class BinanceFutures:
 
     def place_market(self, symbol: str, side: str, qty: str,
                      reduce_only: bool = False, new_client_order_id: Optional[str] = None):
-        """
-        Маркет-ордер. Для закрытия позиции используем reduceOnly=True.
-        """
         return self.client.new_order(
             symbol=symbol,
             side=side,
@@ -60,6 +52,29 @@ class BinanceFutures:
             newClientOrderId=new_client_order_id
         )
 
+    # ---- TP/SL (market) с closePosition=True ----
+    def place_take_profit_market(self, symbol: str, side: str, stop_price: str,
+                                 new_client_order_id: Optional[str] = None):
+        # NB: quantity НЕ указываем, используем closePosition=True
+        return self.client.new_order(
+            symbol=symbol,
+            side=side,
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=stop_price,
+            closePosition=True,
+            newClientOrderId=new_client_order_id
+        )
+
+    def place_stop_market(self, symbol: str, side: str, stop_price: str,
+                          new_client_order_id: Optional[str] = None):
+        return self.client.new_order(
+            symbol=symbol,
+            side=side,
+            type="STOP_MARKET",
+            stopPrice=stop_price,
+            closePosition=True,
+            newClientOrderId=new_client_order_id
+        )
 
     def cancel_order(self, symbol: str, order_id: int | None = None, orig_client_order_id: str | None = None):
         return self.client.cancel_order(symbol=symbol, orderId=order_id, origClientOrderId=orig_client_order_id)
@@ -71,61 +86,66 @@ class BinanceFutures:
             origClientOrderId=orig_client_order_id
         )
 
+    def list_open_orders(self, symbol: str):
+        """
+        Возвращает открытые ордера по символу, если метод SDK доступен.
+        Используется реже, т.к. для очистки мы теперь зовём cancel_open_orders().
+        """
+        m = getattr(self.client, "get_open_orders", None)
+        if callable(m):
+            try:
+                return m(symbol=symbol)
+            except TypeError:
+                data = m() or []
+                return [o for o in data if str(o.get("symbol","")).upper() == symbol.upper()]
+        # если метода нет — вернём пусто (чтобы вызывающий код не падал)
+        return []
+
+
 
     def book_ticker(self, symbol: str) -> Dict[str, Any]:
-        """
-        Возвращает лучшую цену bid/ask — дешёвый эндпоинт для быстрой подстройки.
-        """
         return self.client.book_ticker(symbol=symbol)
 
     # --- Positions / PnL ---
     def position_risk(self, symbol: str | None = None):
-        m = getattr(self.client, "get_position_risk", None) or getattr(self.client, "position_risk", None)
-        if not callable(m):
-            raise AttributeError("UMFutures has no position_risk/get_position_risk")
-        try:
-            data = m() if symbol is None else m(symbol=symbol)
-        except TypeError:
-            data = m()
+        data = self.client.get_position_risk()
         if symbol:
-            data = [x for x in data if str(x.get("symbol", "")).upper() == symbol.upper()]
+            data = [x for x in data if x["symbol"] == symbol]
         return data
-
 
     def get_positions(self, symbol: str):
         """
-        Универсально получить позиции по символу.
-        Пробуем разные имена методов у UMFutures,
-        в крайнем случае читаем из account()['positions'].
-        Возвращает список позиций (как минимум с полями symbol, positionAmt).
+        Сначала читаем get_position_risk() и фильтруем, т.к. это самый стабильный путь.
+        Дальше — совместимость со старыми именами.
         """
         sym = symbol.upper()
 
-        # 1) Пробуем прямые методы разных версий
-        for name in ("get_position_risk", "position_risk", "position_information", "futures_position_information"):
+        # 0) надёжный способ: get_position_risk() без символа
+        gpr = getattr(self.client, "get_position_risk", None)
+        if callable(gpr):
+            data = gpr() or []
+            return [p for p in data if str(p.get("symbol","")).upper() == sym]
+
+        # 1) некоторые версии принимают symbol
+        for name in ("position_risk", "position_information", "futures_position_information"):
             m = getattr(self.client, name, None)
             if callable(m):
                 try:
-                    # Некоторые реализации не принимают symbol и возвращают всё.
-                    data = m(symbol=sym) if "symbol" in getattr(m, "__code__", None).co_varnames else m()
+                    return m(symbol=sym)
                 except TypeError:
-                    data = m()
-                # Нормализуем к списку по symbol
-                if isinstance(data, dict):
-                    data = [data]
-                return [p for p in (data or []) if str(p.get("symbol", "")).upper() == sym]
+                    # без символа -> фильтруем вручную
+                    data = m() or []
+                    return [p for p in data if str(p.get("symbol","")).upper() == sym]
 
-        # 2) Фолбэк: берём все позиции из account()
+        # 2) фолбэк: account()['positions']
         acc = getattr(self.client, "account", None)
         if callable(acc):
             data = acc() or {}
             pos = data.get("positions", [])
             return [p for p in pos if str(p.get("symbol", "")).upper() == sym]
 
-        raise AttributeError(
-            "Positions endpoint not found on UMFutures "
-            "(tried: get_position_risk, position_risk, position_information, futures_position_information, account)"
-        )
+        raise AttributeError("Positions endpoint not found on UMFutures")
+
 
     # --- Helpers ---
     @staticmethod

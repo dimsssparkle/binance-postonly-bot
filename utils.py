@@ -27,7 +27,7 @@ def parse_symbol_filters(exchange_info: Dict[str, Any], symbol: str):
         elif f["filterType"] == "LOT_SIZE":
             step_size = f["stepSize"]
         elif f["filterType"] == "MIN_NOTIONAL":
-            min_notional = f["notional"]
+            min_notional = f["notional"] if "notional" in f else f["minNotional"]
     return {
         "tickSize": tick_size,
         "stepSize": step_size,
