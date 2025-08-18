@@ -1,8 +1,5 @@
-from __future__ import annotations
 import os
 import logging
-log = logging.getLogger(__name__)
-log.info(f"API key length: {len(os.getenv('BINANCE_API_KEY',''))}, secret length: {len(os.getenv('BINANCE_API_SECRET',''))}")
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Request, Body
 from pydantic import BaseModel, field_validator
@@ -13,13 +10,15 @@ from config import (
     SYMBOL_DEFAULT, QTY_DEFAULT, LEVERAGE_DEFAULT, ORDER_TIMEOUT_MS, MAX_RETRIES, CLOSE_TIMEOUT_MS,
     TV_WEBHOOK_SECRET, LOG_LEVEL, PORT, HEDGE_MODE
 )
+import time
 import uvicorn
 import json
-
 from signal_router import SignalRouter
 
-logging.basicConfig(level=LOG_LEVEL)
+# Настроим логирование до первого использования логгера
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
+log.debug(f"API key length: {len(os.getenv('BINANCE_API_KEY',''))}, secret length: {len(os.getenv('BINANCE_API_SECRET',''))}")
 
 app = FastAPI(title="Binance Post-Only Bot", version="1.0.0")
 
@@ -101,27 +100,34 @@ def ensure_symbol_setup(symbol: str) -> None:
 
 @app.post("/webhook")
 async def tv_webhook(request: Request, secret: Optional[str] = None):
-    # секьюрность
-    if TV_WEBHOOK_SECRET and secret != TV_WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="bad secret")
-
-    # пробуем JSON
+    # Читаем тело ОДИН раз (для JSON и fallback)
+    raw = await request.body()
     payload = {}
+
+    # Пытаемся распарсить JSON
     try:
-        payload = await request.json()
+        if raw:
+            payload = json.loads(raw.decode("utf-8"))
     except Exception:
         # fallback: text/plain вида "key: val"
         try:
-            raw = await request.body()
-            if raw:
-                text = raw.decode("utf-8", errors="ignore")
-                for line in text.splitlines():
-                    if ":" in line:
-                        k, v = line.split(":", 1)
-                        payload[k.strip()] = v.strip()
+            text = raw.decode("utf-8", errors="ignore")
+            for line in text.splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    payload[k.strip()] = v.strip()
         except Exception:
             payload = {}
 
+    # Секьюрность: принимаем секрет из query, заголовка, либо тела
+    header_secret = request.headers.get("X-Webhook-Secret")
+    body_secret = (payload.get("secret") or None) if isinstance(payload, dict) else None
+    if TV_WEBHOOK_SECRET:
+        provided = secret or header_secret or body_secret
+        if provided != TV_WEBHOOK_SECRET:
+            raise HTTPException(status_code=403, detail="bad secret")
+
+    # Нормализуем вход
     side = (payload.get("side") or "").lower()
     symbol = (payload.get("symbol") or SYMBOL_DEFAULT).upper()
     if side not in ("long", "short"):
@@ -129,17 +135,16 @@ async def tv_webhook(request: Request, secret: Optional[str] = None):
 
     lk = _lock_for(symbol)
     with lk:
-        try:
-            client.set_margin_type_isolated(symbol)
-        except Exception:
-            pass
-        try:
-            client.set_leverage(symbol, LEVERAGE_DEFAULT)
-        except Exception:
-            pass
+        ensure_symbol_setup(symbol)
 
         router.register(side)
         spam = router.in_spam()
+        if spam:
+            log.info("[SPAM MODE] reason=frequency_or_hold | "
+                     f"events_in_window={len(router.events)}; "
+                     f"flips={sum(1 for i in range(1, len(router.events)) if router.events[i-1][1] != router.events[i][1])}; "
+                     f"since_last_open={int(time.time() - router.last_open_ts) if router.last_open_ts else 'n/a'}s")
+
 
         om = build_manager(symbol, QTY_DEFAULT)
         try:
@@ -158,11 +163,16 @@ async def tv_webhook(request: Request, secret: Optional[str] = None):
             raise HTTPException(status_code=500, detail=str(e))
 
 
-
 @app.on_event("startup")
 def _init():
-    # Не вызываем приватные эндпоинты, чтобы сервер не падал при проблемах с ключами.
-    log.info("Startup OK: skipping position mode/leverage at startup")
+    # Не вызываем критичные приватные эндпоинты без защиты
+    log.info("Startup OK: applying safe initial settings")
+    try:
+        client.set_position_mode(hedge=(HEDGE_MODE.lower() == "on"))
+        log.info(f"Position mode set: {'HEDGE' if HEDGE_MODE.lower() == 'on' else 'ONE-WAY'}")
+    except Exception:
+        log.warning("Failed to set position mode; will continue without changing it", exc_info=True)
+
 
 
 @app.get("/healthz")
@@ -177,17 +187,16 @@ def manual_trade(payload: ManualPayload):
 
     lk = _lock_for(symbol)
     with lk:
-        try:
-            client.set_margin_type_isolated(symbol)
-        except Exception:
-            pass
-        try:
-            client.set_leverage(symbol, LEVERAGE_DEFAULT)
-        except Exception:
-            pass
+        ensure_symbol_setup(symbol)
 
         router.register(side)
         spam = router.in_spam()
+        if spam:
+            log.info("[SPAM MODE] reason=frequency_or_hold | "
+                     f"events_in_window={len(router.events)}; "
+                     f"flips={sum(1 for i in range(1, len(router.events)) if router.events[i-1][1] != router.events[i][1])}; "
+                     f"since_last_open={int(time.time() - router.last_open_ts) if router.last_open_ts else 'n/a'}s")
+
 
         om = build_manager(symbol, payload.qty or QTY_DEFAULT)
         try:

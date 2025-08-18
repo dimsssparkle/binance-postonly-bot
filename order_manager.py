@@ -1,19 +1,14 @@
 from __future__ import annotations
-import os
 import time, uuid
 from typing import Literal, Dict, Any
 from binance.error import ClientError
 from binance_client import BinanceFutures
 from utils import round_to_step
+from config import TP_PCT, SL_PCT  # <-- берем TP/SL из одного источника
 import logging
 
 log = logging.getLogger("order_manager")
 Side = Literal["BUY", "SELL"]
-
-# Параметры выходов (можно переопределить через .env)
-TP_PCT = float(os.getenv("TP_PCT", "0.002"))  # 0.2% по умолчанию
-SL_PCT = float(os.getenv("SL_PCT", "0.002"))  # 0.2% по умолчанию
-
 
 class OrderManager:
     def __init__(self, client: BinanceFutures, symbol: str, qty_default: float,
@@ -97,7 +92,7 @@ class OrderManager:
                     new_client_order_id=tp_cid,
                 )
                 placed["tp"] = {"cid": tp_cid, "stopPrice": tp_price_str, "raw": tp}
-                log.info(f"[TP] TAKE_PROFIT_MARKET placed: side={close_side} stopPrice={tp_price_str}")
+                log.info(f"[TP] TAKE_PROFIT_MARKET placed: entry_side={side} close_side={close_side} stopPrice={tp_price_str}")
             except Exception as e:
                 log.warning(f"[TP place] failed: {e}", exc_info=True)
 
@@ -112,7 +107,7 @@ class OrderManager:
                     new_client_order_id=sl_cid,
                 )
                 placed["sl"] = {"cid": sl_cid, "stopPrice": sl_price_str, "raw": sl}
-                log.info(f"[SL] STOP_MARKET placed: side={close_side} stopPrice={sl_price_str}")
+                log.info(f"[SL] STOP_MARKET placed: entry_side={side} close_side={close_side} stopPrice={sl_price_str}")
             except Exception as e:
                 log.warning(f"[SL place] failed: {e}", exc_info=True)
 
@@ -153,7 +148,7 @@ class OrderManager:
             log.error(f"[ERROR] Не удалось получить позиции: {e}", exc_info=True)
             raise
 
-    def _wait_entry_info(self, timeout_ms: int = 5000):
+    def _wait_entry_info(self, timeout_ms: int = 7000):
         """
         Ждём пока после входа стабилизируется entryPrice/positionAmt.
         Увеличили таймаут до 5с — у Binance обновление entryPrice иногда запаздывает.
@@ -181,16 +176,15 @@ class OrderManager:
     # -------- Exit orders (TP/SL) --------
     def cancel_exit_orders(self):
         """
-        Самый надёжный способ на USD-M фьючерсах: снести все открытые ордера символа.
+        Самый надежный способ на USD-M фьючерсах: снести все открытые ордера символа.
         Это уберёт старые TP/SL и любые подвисшие лимитки.
         """
         try:
-            # метод SDK для DELETE /fapi/v1/allOpenOrders
-            self.client.client.cancel_open_orders(symbol=self.symbol)
+            self.client.cancel_all_open_orders(self.symbol)
             log.info(f"[CANCEL EXITS] cancel_open_orders({self.symbol}) done")
         except Exception as e:
-            # даже если метод в этой версии SDK отличается, нам важно не падать
-            log.warning(f"[CANCEL EXITS] cancel_open_orders failed: {e}")
+            log.warning(f"[CANCEL EXITS] cancel_open_orders failed: {e}", exc_info=True)
+
 
 
     def _exit_sides(self, entry_side: Side) -> Side:
@@ -272,6 +266,7 @@ class OrderManager:
                 "clientOrderId": None,
                 "entryPrice": ep,
                 "exits": exits,
+                "mode": "maker",
             }
 
         while attempts < self.max_retries:
@@ -304,6 +299,7 @@ class OrderManager:
                         "clientOrderId": cid,
                         "entryPrice": ep,
                         "exits": exits,
+                        "mode": "maker",
                     }
                 time.sleep(0.05)
 
@@ -324,6 +320,7 @@ class OrderManager:
                     "clientOrderId": cid,
                     "entryPrice": ep,
                     "exits": exits,
+                    "mode": "maker",
                 }
 
             time.sleep(self.order_timeout_ms / 1000)

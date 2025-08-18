@@ -24,8 +24,24 @@ services:
       - key: MAX_RETRIES
         value: "25"
       - key: HEDGE_MODE
-        value: off
+        value: "off"
       - key: TV_WEBHOOK_SECRET
         sync: false
       - key: LOG_LEVEL
         value: INFO
+      - key: CLOSE_TIMEOUT_MS
+        value: "2500"
+      - key: TP_PCT
+        value: "0.0018"
+      - key: SL_PCT
+        value: "0.0015"
+      - key: SPAM_WINDOW_SEC
+        value: "75"
+      - key: SPAM_COUNT
+        value: "4"
+      - key: SPAM_FLIPS
+        value: "3"
+      - key: SPAM_MIN_HOLD_SEC
+        value: "30"
+      - key: SPAM_HYSTERESIS_SEC
+        value: "50"
