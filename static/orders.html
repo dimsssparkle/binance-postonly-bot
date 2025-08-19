@@ -56,10 +56,10 @@
     <!-- NEW: Actions + NET PnL -->
     <div class="card" style="flex:1 1 380px;min-width:320px">
       <h3>Actions</h3>
-      <div class="toolbar">
+<!--       <div class="toolbar">
         <button id="dcaBtn">DCA</button>
         <button id="closeBtn">CLOSE</button>
-      </div>
+      </div> -->
       <div style="margin-top:8px">
         <strong>NET PnL (last 50):</strong>
         <span id="netPnL">—</span>
@@ -74,6 +74,7 @@
       <thead>
         <tr>
           <th>Symbol</th>
+          <th>Side</th>
           <th class="right">Qty</th>
           <th class="right">Realized PnL</th>
           <th class="right">Fee In</th>
@@ -84,6 +85,7 @@
           <th>Closed</th>
         </tr>
       </thead>
+
       <tbody></tbody>
     </table>
     <small>Источник данных: <code>/orders/open</code> и <code>/orders/history.json</code></small>
@@ -127,6 +129,7 @@ function renderHistory(rows){
     const tr=document.createElement('tr');
     tr.innerHTML = `
       <td>${fmtNum(r.symbol)}</td>
+      <td>${r.side || ""}</td>
       <td class="right">${fmtNum(r.qty)}</td>
       <td class="right ${clsPnL(r.pnl_realized)}">${fmtMoney(r.pnl_realized)}</td>
       <td class="right">${fmtMoney(r.fee_entry)}</td>

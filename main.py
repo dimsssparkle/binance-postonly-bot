@@ -337,8 +337,10 @@ def _roundtrips_from_trades(symbol: str, limit_rounds: int = 50, limit_trades: i
         if same_dir_or_flat:
             # чистый набор (entry)
             if current is None:
+                direction = sign
                 current = {
                     "symbol": symbol,
+                    "side": "LONG" if direction == 1 else "SHORT",
                     "qty": 0.0,
                     "fee_entry": 0.0,
                     "fee_exit": 0.0,
@@ -348,7 +350,6 @@ def _roundtrips_from_trades(symbol: str, limit_rounds: int = 50, limit_trades: i
                     "open_time": ts,
                     "close_time": None,
                 }
-                direction = sign
             current["qty"] += qty
             current["fee_entry"] += commission
             pos += val
@@ -385,8 +386,10 @@ def _roundtrips_from_trades(symbol: str, limit_rounds: int = 50, limit_trades: i
         # Перестрёл — старт нового раунда в обратную сторону
         if overshoot > 1e-12:
             # новый раунд стартует прямо этим же трейдом
+            direction = sign
             current = {
                 "symbol": symbol,
+                "side": "LONG" if direction == 1 else "SHORT",
                 "qty": overshoot,
                 "fee_entry": entry_fee_for_overshoot,
                 "fee_exit": 0.0,
@@ -396,7 +399,6 @@ def _roundtrips_from_trades(symbol: str, limit_rounds: int = 50, limit_trades: i
                 "open_time": ts,
                 "close_time": None,
             }
-            direction = sign
             pos = sign * overshoot
 
     # Возвращаем последние N закрытых раундов (плоских в конце)
