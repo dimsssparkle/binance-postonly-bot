@@ -32,7 +32,7 @@ services:
       - key: CLOSE_TIMEOUT_MS
         value: "2500"
       - key: TP_PCT
-        value: "0.0018"
+        value: "0.0023"
       - key: SL_PCT
         value: "0.0015"
       - key: SPAM_WINDOW_SEC

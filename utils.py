@@ -13,6 +13,19 @@ def round_to_step(value: float | str, step: float | str) -> str:
     quant = (d(1) / s).quantize(d(1), rounding=ROUND_DOWN)
     return str((v * quant).to_integral_value(rounding=ROUND_DOWN) / quant)
 
+def round_up_to_step(value: float | str, step: float | str) -> str:
+    """Жёсткое округление ВВЕРХ к шагу (используем для соблюдения MIN_NOTIONAL)."""
+    v, s = d(value), d(step)
+    if s == 0:
+        return str(v)
+    quant = (d(1) / s).quantize(d(1), rounding=ROUND_DOWN)
+    scaled = v * quant
+    floored = scaled.to_integral_value(rounding=ROUND_DOWN)
+    if scaled != floored:
+        floored += 1
+    return str(floored / quant)
+
+
 def parse_symbol_filters(exchange_info: Dict[str, Any], symbol: str):
     """Достаёт tickSize, stepSize и minNotional для symbol из futures exchangeInfo."""
     sym = next((s for s in exchange_info["symbols"] if s["symbol"] == symbol), None)

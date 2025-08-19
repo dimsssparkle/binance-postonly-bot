@@ -3,8 +3,9 @@ import time, uuid
 from typing import Literal, Dict, Any
 from binance.error import ClientError
 from binance_client import BinanceFutures
-from utils import round_to_step
-from config import TP_PCT, SL_PCT  # <-- берем TP/SL из одного источника
+from utils import round_to_step, round_up_to_step
+
+from config import TP_PCT, SL_PCT, POSTONLY_MARKET_AFTER
 import logging
 
 log = logging.getLogger("order_manager")
@@ -13,7 +14,7 @@ Side = Literal["BUY", "SELL"]
 class OrderManager:
     def __init__(self, client: BinanceFutures, symbol: str, qty_default: float,
                  tick_size: str, step_size: str, order_timeout_ms: int, max_retries: int,
-                 close_timeout_ms: int | None = None):
+                 close_timeout_ms: int | None = None, min_notional: str | None = None):
         self.client = client
         self.symbol = symbol
         self.qty_default = qty_default
@@ -22,6 +23,8 @@ class OrderManager:
         self.order_timeout_ms = order_timeout_ms
         self.max_retries = max_retries
         self.close_timeout_ms = close_timeout_ms or (self.order_timeout_ms * 2)
+        self.min_notional = float(min_notional or 0)
+
 
     def get_entry_price(self) -> float:
         """
@@ -58,28 +61,14 @@ class OrderManager:
             except Exception:
                 entry_price = 0.0
 
+        # Быстрый выход, если TP/SL выключены
         tp_pct = float(TP_PCT or 0.0)
         sl_pct = float(SL_PCT or 0.0)
-
-        # если оба выключены — быстро выходим
         if tp_pct <= 0 and sl_pct <= 0:
             return placed
 
-        # расчёт цен триггеров
-        if entry_price > 0:
-            if side == "BUY":  # long
-                tp_price = entry_price * (1.0 + tp_pct) if tp_pct > 0 else None
-                sl_price = entry_price * (1.0 - sl_pct) if sl_pct > 0 else None
-            else:              # short
-                tp_price = entry_price * (1.0 - tp_pct) if tp_pct > 0 else None
-                sl_price = entry_price * (1.0 + sl_pct) if sl_pct > 0 else None
-        else:
-            tp_price = None
-            sl_price = None
-
-        # округление по tickSize
-        tp_price_str = round_to_step(tp_price, self.tick_size) if tp_price else None
-        sl_price_str = round_to_step(sl_price, self.tick_size) if sl_price else None
+        # Готовые округлённые триггеры
+        tp_price_str, sl_price_str = self._exit_prices(entry_price, side)
 
         # --- TP: TAKE_PROFIT_MARKET closePosition=True
         if tp_price_str:
@@ -135,6 +124,20 @@ class OrderManager:
         q = qty if qty is not None else self.qty_default
         return round_to_step(q, self.step_size)
 
+    def _ensure_min_notional_qty(self, price: float, qty_str: str) -> str:
+        """
+        Если qty*price < MIN_NOTIONAL — повышаем qty вверх к stepSize.
+        """
+        try:
+            q = float(qty_str)
+            if self.min_notional > 0 and price > 0 and (q * price) < self.min_notional:
+                need = self.min_notional / price
+                return round_up_to_step(need, self.step_size)
+        except Exception:
+            pass
+        return qty_str
+
+
     # -------- Positions --------
     def get_position_amt(self) -> float:
         try:
@@ -151,7 +154,7 @@ class OrderManager:
     def _wait_entry_info(self, timeout_ms: int = 7000):
         """
         Ждём пока после входа стабилизируется entryPrice/positionAmt.
-        Увеличили таймаут до 5с — у Binance обновление entryPrice иногда запаздывает.
+        Таймаут увеличен до ~7с — у Binance обновление entryPrice иногда запаздывает.
         Если спустя таймаут entryPrice всё ещё 0, но позиция != 0 — вернём (amt, 0.0),
         а TP/SL просто не будем ставить (чтобы не ставить мусор).
         """
@@ -227,10 +230,19 @@ class OrderManager:
         """
         qty_str = self.norm_qty(qty)
 
+        # Подстрахуемся от MIN_NOTIONAL
+        try:
+            bt = self.client.book_ticker(self.symbol)
+            bid = float(bt["bidPrice"]); ask = float(bt["askPrice"])
+            price_for_check = ask if side == "BUY" else bid
+            qty_str = self._ensure_min_notional_qty(price_for_check, qty_str)
+        except Exception:
+            pass
+
         # 1) открыть market
         self.client.place_market(self.symbol, side, qty_str, reduce_only=False)
 
-        # 2) получить entryPrice из позиций (резерв — mid по стакану внутри place_exit_orders)
+        # 2) получить entryPrice
         ep = self.get_entry_price()
 
         # 3) выставить TP/SL
@@ -246,16 +258,25 @@ class OrderManager:
         }
 
 
-    # -------- Open maker order with rapid reprice loop --------
-    def open_postonly_maker(self, side: Side, qty: float | None = None):
+    def open_postonly_maker(self, side: Side, qty: float | None = None, market_fallback_after: int = POSTONLY_MARKET_AFTER):
         """
-        Открывает позицию лимитным Post-Only, репрайсит до исполнения.
-        После успешного входа выставляет TP/SL.
+        1) Пытаемся открыть лимитным Post-Only до market_fallback_after раз.
+           На каждой попытке: ставим post-only, ждём исполнения (по факту позиции), иначе отменяем и репрайсим.
+        2) Если не добрали целевой объём — принудительно добираем MARKET.
+        3) В конце ставим TP/SL (на весь текущий объём) через closePosition=True.
         """
         qty_str = self.norm_qty(qty)
-        attempts = 0
 
-        # Если позиция уже достигнута по факту — просто поставим выходы и вернёмся
+        # Стартовая подстраховка от MIN_NOTIONAL по текущему рынку
+        try:
+            bt = self.client.book_ticker(self.symbol)
+            bid = float(bt["bidPrice"]); ask = float(bt["askPrice"])
+            price_check = ask if side == "BUY" else bid
+            qty_str = self._ensure_min_notional_qty(price_check, qty_str)
+        except Exception:
+            pass
+
+        # Если целевой объём уже достигнут — просто ставим выходы
         if self._position_reached(side, float(qty_str)):
             ep = self.get_entry_price()
             exits = self.place_exit_orders(side, ep, qty_str)
@@ -269,32 +290,36 @@ class OrderManager:
                 "mode": "maker",
             }
 
-        while attempts < self.max_retries:
-            attempts += 1
+        # --- Пост-онли попытки ---
+        for attempt in range(1, int(market_fallback_after) + 1):
             price = self.maker_price(side)
             cid = f"open-{uuid.uuid4().hex[:10]}"
 
-            # Ставим лимитный post-only
+            # Пересчитываем qty под конкретную цену попытки (MIN_NOTIONAL)
+            qty_try = self._ensure_min_notional_qty(float(price), qty_str)
+
+            placed = False
             try:
                 self.client.place_limit_post_only(
-                    self.symbol, side, qty_str, price,
+                    self.symbol, side, qty_try, price,
                     reduce_only=False,
                     new_client_order_id=cid
                 )
-            except Exception:
-                # например, -5022 (иммедиат матч) — ждём и репрайсим
+                placed = True
+            except Exception as e:
+                log.warning(f"[OPEN maker] post-only rejected: {e}. attempt={attempt}/{market_fallback_after}")
                 time.sleep(self.order_timeout_ms / 1000)
                 continue
 
-            # Ждём исполнения по факту позиции (частичное/полное)
+            # Ждём набора позиции
             deadline = self.client.now_ms() + (self.order_timeout_ms * 2)
             while self.client.now_ms() < deadline:
-                if self._position_reached(side, float(qty_str)):
+                if self._position_reached(side, float(qty_try)):
                     ep = self.get_entry_price()
                     exits = self.place_exit_orders(side, ep, qty_str)
                     return {
                         "filled": True,
-                        "attempts": attempts,
+                        "attempts": attempt,
                         "price": price,
                         "clientOrderId": cid,
                         "entryPrice": ep,
@@ -303,35 +328,70 @@ class OrderManager:
                     }
                 time.sleep(0.05)
 
-            # Не успели — отменяем и пробуем снова
-            try:
-                self.client.cancel_order(self.symbol, orig_client_order_id=cid)
-            except Exception:
-                pass
-
-            # На всякий случай: вдруг долилось в последнюю миллисекунду
-            if self._position_reached(side, float(qty_str)):
-                ep = self.get_entry_price()
-                exits = self.place_exit_orders(side, ep, qty_str)
-                return {
-                    "filled": True,
-                    "attempts": attempts,
-                    "price": price,
-                    "clientOrderId": cid,
-                    "entryPrice": ep,
-                    "exits": exits,
-                    "mode": "maker",
-                }
-
+            # Не успели — отменяем и пробуем дальше
+            if placed:
+                try:
+                    self.client.cancel_order(self.symbol, orig_client_order_id=cid)
+                except Exception:
+                    pass
             time.sleep(self.order_timeout_ms / 1000)
 
-        raise RuntimeError("Failed to open maker order in time")
+        # --- Market фолбэк: добираем остаток ---
+        step = float(self.step_size)
+        remaining = self._remaining_to_target(side, float(qty_str))
+        if remaining <= step / 2:
+            ep = self.get_entry_price()
+            exits = self.place_exit_orders(side, ep, qty_str)
+            return {
+                "filled": True,
+                "attempts": int(market_fallback_after),
+                "price": None,
+                "clientOrderId": None,
+                "entryPrice": ep,
+                "exits": exits,
+                "mode": "maker",
+            }
 
+        rem_str = round_to_step(remaining, self.step_size)
+        try:
+            bt = self.client.book_ticker(self.symbol)
+            bid = float(bt["bidPrice"]); ask = float(bt["askPrice"])
+            price_for_check = ask if side == "BUY" else bid
+            rem_str = self._ensure_min_notional_qty(price_for_check, rem_str)
+        except Exception:
+            pass
+
+        self.client.place_market(self.symbol, side, rem_str, reduce_only=False)
+        amt, ep = self._wait_entry_info(timeout_ms=7000)
+        if ep == 0.0:
+            ep = self.get_entry_price()
+
+        exits = self.place_exit_orders(side, ep, qty_str)
+        return {
+            "filled": True,
+            "attempts": int(market_fallback_after),
+            "price": None,
+            "clientOrderId": None,
+            "entryPrice": ep,
+            "exits": exits,
+            "mode": "market_fallback",
+        }
 
     def _position_reached(self, side: Side, target_qty: float) -> bool:
         amt = float(self.get_position_amt())
         need = float(target_qty) * 0.999
         return (amt >= need) if side.upper() == "BUY" else (-amt >= need)
+
+    def _remaining_to_target(self, side: Side, target_qty: float) -> float:
+        """
+        Сколько объёма ещё не добрали в текущую сторону (one-way режим).
+        Предполагается, что встречная позиция уже закрыта выше по логике execute_signal().
+        """
+        amt = float(self.get_position_amt())
+        current_same_dir = max(amt, 0.0) if side == "BUY" else max(-amt, 0.0)
+        need = max(0.0, float(target_qty) - current_same_dir)
+        return need
+
 
     def close_opposite_if_any(self, side: Side):
         """Сначала пробуем post-only reduceOnly, при -5022 — MARKET closePosition."""
@@ -405,9 +465,8 @@ class OrderManager:
         Высокоуровневый вход:
         - чистим старые TP/SL,
         - закрываем встречную позицию,
-        - открываем новую (market в шуме, post-only в нормальном режиме),
-        - (open_market/open_postonly_maker сами поставят TP/SL).
-        side_str: "long"/"short" (или "buy"/"sell")
+        - при spam_mode идём сразу MARKET,
+          иначе пробуем post-only с ограниченным числом попыток и фолбэком в MARKET.
         """
         s = side_str.lower()
         if s in ("long", "buy"):
@@ -420,15 +479,19 @@ class OrderManager:
         # убрать висящие TP/SL от прошлого входа
         self.cancel_exit_orders()
 
-        if spam_mode:
+        # закрыть встречную позицию (мягко)
+        try:
+            self.close_opposite_if_any(side)
+        except Exception:
             try:
-                self.close_opposite_if_any(side)
+                self.close_market(side)
             except Exception:
-                try:
-                    self.close_market(side)
-                except Exception:
-                    pass
+                pass
+
+        # Реально переключаемся на MARKET в spam-режиме
+        log.info(f"[OPEN] mode={'spam' if spam_mode else 'normal'}; strategy={'market' if spam_mode else 'postonly_then_market_fallback'}")
+        if spam_mode:
             return self.open_market(side, qty=qty)
         else:
-            self.close_opposite_if_any(side)
             return self.open_postonly_maker(side, qty=qty)
+

@@ -29,3 +29,6 @@ PORT = int(os.getenv("PORT", "8000"))
 # ---- TP/SL config ----
 TP_PCT = float(os.getenv("TP_PCT", "0.0"))  # 0.0 = выключено
 SL_PCT = float(os.getenv("SL_PCT", "0.0"))  # 0.0 = выключено
+
+# Сколько последовательных попыток post-only делать перед принудительным market-входом
+POSTONLY_MARKET_AFTER = int(os.getenv("POSTONLY_MARKET_AFTER", "3"))

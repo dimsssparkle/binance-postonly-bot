@@ -15,6 +15,12 @@ import uvicorn
 import json
 from signal_router import SignalRouter
 
+from starlette.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, HTMLResponse
+import asyncio
+
+
+
 # Настроим логирование до первого использования логгера
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -85,8 +91,10 @@ def build_manager(symbol: str, qty_default: float) -> OrderManager:
         order_timeout_ms=ORDER_TIMEOUT_MS,
         max_retries=MAX_RETRIES,
         close_timeout_ms=CLOSE_TIMEOUT_MS,
+        min_notional=filters["minNotional"],
     )
     return om
+
 
 def ensure_symbol_setup(symbol: str) -> None:
     try:
@@ -168,10 +176,15 @@ def _init():
     # Не вызываем критичные приватные эндпоинты без защиты
     log.info("Startup OK: applying safe initial settings")
     try:
-        client.set_position_mode(hedge=(HEDGE_MODE.lower() == "on"))
-        log.info(f"Position mode set: {'HEDGE' if HEDGE_MODE.lower() == 'on' else 'ONE-WAY'}")
-    except Exception:
-        log.warning("Failed to set position mode; will continue without changing it", exc_info=True)
+        resp = client.set_position_mode(hedge=(HEDGE_MODE.lower() == "on"))
+        if isinstance(resp, dict) and resp.get("ignored"):
+            log.info("Position mode already set; skipping change")
+        else:
+            log.info(f"Position mode set: {'HEDGE' if HEDGE_MODE.lower() == 'on' else 'ONE-WAY'}")
+    except Exception as e:
+        log.warning(f"Failed to set position mode: {e}")
+
+
 
 
 
@@ -251,6 +264,230 @@ def close_position(payload: Optional[ClosePayload] = None):
     except Exception as e:
         log.exception("close_position failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+def _orders_snapshot(symbol: str):
+    sym = symbol.upper()
+
+    # Позиция (расширенный снэпшот)
+    try:
+        position = client.get_position_overview(sym)
+    except Exception as e:
+        log.warning(f"[ORDERS] failed to build position overview: {e}", exc_info=True)
+        position = {
+            "symbol": sym,
+            "positionAmt": "0",
+            "entryPrice": "0",
+            "markPrice": "0",
+            "unRealizedProfit": "0",
+            "leverage": "0",
+            "marginType": "",
+        }
+
+    # Стакан (best bid/ask)
+    book = {}
+    try:
+        bt = client.book_ticker(sym) or {}
+        book = {"bidPrice": bt.get("bidPrice"), "askPrice": bt.get("askPrice")}
+    except Exception as e:
+        log.warning(f"[ORDERS] failed to fetch book_ticker: {e}", exc_info=True)
+
+    return {
+        "symbol": sym,
+        "position": position,
+        "book": book,
+        "ts": int(time.time() * 1000),
+    }
+
+
+def _roundtrips_from_trades(symbol: str, limit_rounds: int = 50, limit_trades: int = 1000):
+    """
+    Восстанавливает «закрытые позиции» (раунды) из последовательности трейдов.
+    Логика:
+      - накапливаем позицию pos (BUY=+qty, SELL=-qty) в one-way режиме;
+      - старт раунда — когда из 0 уходим в ненулевую позицию;
+      - закрытие раунда — когда позиция возвращается к 0 (или трейд «перестрелил» и часть ушла в новый раунд);
+      - комиссии: часть комиссии трейда, закрывающая позицию, идёт в fee_exit; оставшаяся — в fee_entry (если был «перестрёл» — в новый раунд);
+      - realizedPnl берём из поля трейда и учитываем только на редьюсе (у Binance оно как раз на закрывающей части).
+    Примечание: если один трейд частично закрывает и тут же открывает в обратную сторону, комиссия сплитится пропорционально.
+    """
+    trades = client.user_trades(symbol, limit=limit_trades) or []
+    trades = sorted(trades, key=lambda t: int(t.get("time", 0)))
+
+    rounds = []
+    pos = 0.0                 # текущая позиция (со знаком)
+    direction = 0             # +1 лонг, -1 шорт; 0 — плоско
+    current = None            # текущий раунд
+
+    for t in trades:
+        side = (t.get("side") or "").upper()
+        if side not in ("BUY", "SELL"):
+            continue
+        qty = float(t.get("qty") or t.get("quantity") or 0.0)
+        if qty <= 0:
+            continue
+
+        commission = abs(float(t.get("commission") or 0.0))
+        realized = float(t.get("realizedPnl") or 0.0)
+        ts = int(t.get("time") or 0)
+
+        sign = 1 if side == "BUY" else -1
+        val = sign * qty
+
+        same_dir_or_flat = (pos == 0) or (pos * sign > 0)
+        if same_dir_or_flat:
+            # чистый набор (entry)
+            if current is None:
+                current = {
+                    "symbol": symbol,
+                    "qty": 0.0,
+                    "fee_entry": 0.0,
+                    "fee_exit": 0.0,
+                    "fee_total": 0.0,
+                    "pnl_realized": 0.0,
+                    "pnl_net": 0.0,
+                    "open_time": ts,
+                    "close_time": None,
+                }
+                direction = sign
+            current["qty"] += qty
+            current["fee_entry"] += commission
+            pos += val
+            continue
+
+        # Иначе — редьюс текущей позиции (возможен «перестрёл»)
+        reduce_amt = min(abs(pos), qty)       # часть, закрывающая старую позицию
+        overshoot = qty - reduce_amt          # остаток, который уйдет в новый раунд
+        exit_fee = commission * (reduce_amt / qty) if qty > 0 else 0.0
+        entry_fee_for_overshoot = commission - exit_fee
+
+        # Реализованный PnL у Binance уже относится к редьюс-части — не скейлим
+        if current is not None:
+            current["fee_exit"] += exit_fee
+            current["pnl_realized"] += realized
+
+        # уменьшаем позицию
+        # редьюс всегда движет pos к 0, т.е. просто вычитаем модуль reduce_amt с соответствующим знаком
+        if pos > 0:
+            pos -= reduce_amt
+        else:
+            pos += reduce_amt
+
+        closed_now = abs(pos) < 1e-12
+        if closed_now and current is not None:
+            current["close_time"] = ts
+            current["fee_total"] = current["fee_entry"] + current["fee_exit"]
+            current["pnl_net"] = current["pnl_realized"] - current["fee_total"]
+            rounds.append(current)
+            current = None
+            direction = 0
+            pos = 0.0
+
+        # Перестрёл — старт нового раунда в обратную сторону
+        if overshoot > 1e-12:
+            # новый раунд стартует прямо этим же трейдом
+            current = {
+                "symbol": symbol,
+                "qty": overshoot,
+                "fee_entry": entry_fee_for_overshoot,
+                "fee_exit": 0.0,
+                "fee_total": 0.0,
+                "pnl_realized": 0.0,
+                "pnl_net": 0.0,
+                "open_time": ts,
+                "close_time": None,
+            }
+            direction = sign
+            pos = sign * overshoot
+
+    # Возвращаем последние N закрытых раундов (плоских в конце)
+    rounds = rounds[-limit_rounds:]
+    rounds.sort(key=lambda r: r.get("close_time") or 0, reverse=True)
+
+    # Нормируем числа до читабельного формата строк
+    def fmt(x: float) -> str:
+        return f"{x:.10f}".rstrip('0').rstrip('.') if isinstance(x, float) else str(x)
+
+    for r in rounds:
+        for k in ("qty", "fee_entry", "fee_exit", "fee_total", "pnl_realized", "pnl_net"):
+            r[k] = fmt(r[k])
+
+    return rounds
+
+
+@app.get("/orders/history.json")
+def orders_history(symbol: Optional[str] = None, limit_rounds: int = 50, limit_trades: int = 1000):
+    """
+    JSON с закрытыми позициями (раунды), для отображения в таблице на orders.html.
+    """
+    sym = (symbol or SYMBOL_DEFAULT).upper()
+    lk = _lock_for(sym)
+    with lk:
+        try:
+            data = _roundtrips_from_trades(sym, limit_rounds=limit_rounds, limit_trades=limit_trades)
+        except Exception as e:
+            log.warning(f"[HISTORY] failed: {e}", exc_info=True)
+            data = []
+    return {"symbol": sym, "rounds": data}
+
+
+@app.get("/orders.html", response_class=FileResponse)
+def orders_html(symbol: Optional[str] = None):
+    """
+    Отдаём статическую страницу дашборда.
+    Параметр symbol читается на клиенте из query (?symbol=ETHUSDT).
+    """
+    return FileResponse("static/orders.html")
+
+
+
+@app.get("/orders/open")
+def orders_open(symbol: Optional[str] = None):
+    """
+    Разовый JSON-снимок открытых ордеров и позиции по символу (по умолчанию SYMBOL_DEFAULT).
+    """
+    sym = (symbol or SYMBOL_DEFAULT).upper()
+    # (опционально) блокируем на время чтения, чтобы не пересекаться с записью
+    lk = _lock_for(sym)
+    with lk:
+        data = _orders_snapshot(sym)
+    return data
+
+async def _sse_gen(symbol: str, interval_ms: int):
+    sym = symbol.upper()
+    interval = max(200, int(interval_ms)) / 1000.0  # защита от слишком частых запросов
+    while True:
+        try:
+            lk = _lock_for(sym)
+            with lk:
+                payload = _orders_snapshot(sym)
+            yield f"data: {json.dumps(payload)}\n\n"
+        except Exception as e:
+            # отправим "пустое" событие, чтобы держать соединение
+            yield f"event: ping\ndata: keepalive\n\n"
+            log.warning(f"[SSE] error: {e}", exc_info=True)
+        await asyncio.sleep(interval)
+
+@app.get("/orders/stream")
+async def orders_stream(symbol: Optional[str] = None, interval_ms: int = 1000):
+    """
+    Server-Sent Events поток с данными по открытым ордерам/позиции.
+    Пример: /orders/stream?symbol=ETHUSDT&interval_ms=1000
+    """
+    sym = (symbol or SYMBOL_DEFAULT).upper()
+    return StreamingResponse(_sse_gen(sym, interval_ms), media_type="text/event-stream")
+
+
+# Раздача статических файлов (папка static/)
+app.mount("/static", StaticFiles(directory="static", html=True), name="static")
+
+
+# Совместимость со старым URL: /orders?symbol=ETHUSDT -> редирект на /orders.html?symbol=ETHUSDT
+@app.get("/orders")
+def orders_redirect(symbol: Optional[str] = None):
+    q = f"?symbol={symbol}" if symbol else ""
+    return RedirectResponse(url=f"/orders.html{q}")
+
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)

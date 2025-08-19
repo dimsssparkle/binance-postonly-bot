@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Orders Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    :root { --fg:#111; --muted:#666; --bg:#fff; --card:#f6f8fa; }
+    @media (prefers-color-scheme: dark) {
+      :root { --fg:#eaeaea; --muted:#a0a0a0; --bg:#0b0b0c; --card:#111317; }
+    }
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
+    .wrap{max-width:1040px;margin:24px auto;padding:0 16px}
+    h1{margin:0 0 16px}
+    .row{display:flex;gap:24px;flex-wrap:wrap}
+    .card{background:var(--card);border-radius:12px;padding:12px 14px}
+    pre{margin:0;white-space:pre-wrap;word-break:break-word}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#e9ecef;color:#222;margin-left:8px;font-size:12px}
+    table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #2a2d33;padding:6px 8px;font-size:13px}
+    th{text-align:left}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    small{color:var(--muted)}
+    .right{text-align:right}
+    .pos{color:#4caf50}
+    .neg{color:#ff6b6b}
+    .toolbar{display:flex;gap:8px;align-items:center;margin:4px 0 14px}
+    input[type=text]{padding:6px 8px;border:1px solid #2a2d33;border-radius:8px;background:transparent;color:var(--fg)}
+    button{padding:6px 10px;border:1px solid #2a2d33;border-radius:8px;background:#161a20;color:#fff;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Orders Dashboard
+    <span id="sym" class="pill">—</span>
+    <span id="lev" class="pill">x–</span>
+  </h1>
+
+  <div class="toolbar">
+    <label>Symbol:&nbsp;<input id="symbolInput" type="text" size="10" /></label>
+    <button id="applyBtn">Apply</button>
+    <small id="ts"></small>
+  </div>
+
+  <div class="row">
+    <div class="card" style="flex:1 1 380px;min-width:320px">
+      <h3>Position</h3>
+      <pre id="pos">loading…</pre>
+    </div>
+    <div class="card" style="flex:1 1 380px;min-width:320px">
+      <h3>Best Bid/Ask</h3>
+      <pre id="book">loading…</pre>
+    </div>
+  </div>
+
+  <h3 style="margin:18px 0 8px">Closed Positions (round trips)</h3>
+  <div class="card">
+    <table id="hist">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th class="right">Qty</th>
+          <th class="right">Realized PnL</th>
+          <th class="right">Fee In</th>
+          <th class="right">Fee Out</th>
+          <th class="right">Fees Total</th>
+          <th class="right">PnL (net)</th>
+          <th>Opened</th>
+          <th>Closed</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <small>Источник данных: <code>/orders/open</code> и <code>/orders/history.json</code></small>
+  </div>
+</div>
+
+<script>
+function qs(k, d){const u=new URL(location.href);return u.searchParams.get(k)||d}
+function setQS(k,v){const u=new URL(location.href);u.searchParams.set(k,v);history.replaceState(null,"",u.toString())}
+function fmtNum(x){return (x==null||x==="")?"":String(x)}
+function fmtMoney(x){const n=Number(x||0);return (n>=0?"+":"") + n.toFixed(6).replace(/\.?0+$/,"")}
+function fmtTs(ms){if(!ms) return ""; const d=new Date(Number(ms)); return d.toLocaleString()}
+function clsPnL(n){n=Number(n||0); return n>=0?"pos":"neg"}
+
+const posEl=document.getElementById('pos');
+const bookEl=document.getElementById('book');
+const symEl=document.getElementById('sym');
+const levEl=document.getElementById('lev');
+const tsEl=document.getElementById('ts');
+const tbody=document.querySelector('#hist tbody');
+const symInput=document.getElementById('symbolInput');
+const applyBtn=document.getElementById('applyBtn');
+
+let sym = (qs("symbol","ETHUSDT")+"").toUpperCase();
+symInput.value = sym;
+
+function renderPosition(data){
+  symEl.textContent = data.symbol || sym;
+  levEl.textContent = "x" + ((data.position && data.position.leverage) ? data.position.leverage : "—")
+                      + (data.position && data.position.marginType ? (" "+data.position.marginType) : "");
+  posEl.textContent = JSON.stringify(data.position||{}, null, 2);
+  bookEl.textContent = JSON.stringify(data.book||{}, null, 2);
+  tsEl.textContent = "Updated: " + fmtTs(data.ts);
+}
+
+function renderHistory(rows){
+  tbody.innerHTML = "";
+  (rows||[]).forEach(r=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML = `
+      <td>${fmtNum(r.symbol)}</td>
+      <td class="right">${fmtNum(r.qty)}</td>
+      <td class="right ${clsPnL(r.pnl_realized)}">${fmtMoney(r.pnl_realized)}</td>
+      <td class="right">${fmtMoney(r.fee_entry)}</td>
+      <td class="right">${fmtMoney(r.fee_exit)}</td>
+      <td class="right">${fmtMoney(r.fee_total)}</td>
+      <td class="right ${clsPnL(r.pnl_net)}">${fmtMoney(r.pnl_net)}</td>
+      <td>${fmtTs(r.open_time)}</td>
+      <td>${fmtTs(r.close_time)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+async function loadAll(){
+  try{
+    const a = await fetch(`/orders/open?symbol=${encodeURIComponent(sym)}`);
+    const j = await a.json();
+    renderPosition(j);
+  }catch(e){}
+  try{
+    const b = await fetch(`/orders/history.json?symbol=${encodeURIComponent(sym)}&limit_rounds=50`);
+    const h = await b.json();
+    renderHistory(h.rounds||[]);
+  }catch(e){}
+}
+
+applyBtn.onclick = ()=>{
+  sym = (symInput.value||"ETHUSDT").toUpperCase();
+  setQS("symbol", sym);
+  loadAll();
+}
+
+loadAll();
+setInterval(loadAll, 5000);
+</script>
+</body>
+</html>
