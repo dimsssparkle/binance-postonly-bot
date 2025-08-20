@@ -2,11 +2,14 @@ services:
   - type: web
     name: binance-postonly-bot
     runtime: python
-    repo: https://github.com/<your-username>/binance-postonly-bot
-    branch: main
+    autoDeploy: true
+    numInstances: 1
+    healthCheckPath: /healthz
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: BINANCE_API_KEY
         sync: false
       - key: BINANCE_API_SECRET
@@ -23,18 +26,20 @@ services:
         value: "200"
       - key: MAX_RETRIES
         value: "25"
+      - key: CLOSE_TIMEOUT_MS
+        value: "2500"
       - key: HEDGE_MODE
-        value: "off"
+        value: off
       - key: TV_WEBHOOK_SECRET
         sync: false
       - key: LOG_LEVEL
         value: INFO
-      - key: CLOSE_TIMEOUT_MS
-        value: "2500"
       - key: TP_PCT
         value: "0.0023"
       - key: SL_PCT
         value: "0.0015"
+      - key: POSTONLY_MARKET_AFTER
+        value: "3"
       - key: SPAM_WINDOW_SEC
         value: "75"
       - key: SPAM_COUNT

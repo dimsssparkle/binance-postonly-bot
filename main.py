@@ -495,12 +495,16 @@ async def orders_stream(symbol: Optional[str] = None, interval_ms: int = 1000):
 # Раздача статических файлов (папка static/)
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 
-
 # Совместимость со старым URL: /orders?symbol=ETHUSDT -> редирект на /orders.html?symbol=ETHUSDT
 @app.get("/orders")
 def orders_redirect(symbol: Optional[str] = None):
     q = f"?symbol={symbol}" if symbol else ""
     return RedirectResponse(url=f"/orders.html{q}")
+
+# NEW: корневой путь на дашборд
+@app.get("/")
+def root_redirect():
+    return RedirectResponse(url="/orders.html")
 
 
 @app.get("/settings/tpsl")

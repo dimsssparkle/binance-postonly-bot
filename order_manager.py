@@ -28,7 +28,7 @@ class OrderManager:
         # runtime-флаги для включения/выключения TP/SL
         self.tp_enabled = tp_enabled
         self.sl_enabled = sl_enabled
-        # MIN_NOTIONAL из exchangeInfo (нужен в _ensure_min_notional_qty)
+        # MIN_NOTIONAL из exchangeInfo (нужен для _ensure_min_notional_qty)
         try:
             self.min_notional = float(min_notional)
         except Exception:

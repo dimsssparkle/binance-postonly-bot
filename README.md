@@ -1,37 +1,21 @@
-# Binance Post-Only Bot
+# Binance Post-Only Bot (Render deploy)
 
-FastAPI сервис, принимающий сигналы (TradingView/ручные) и ставящий лимитные **post-only** ордера с быстрым репрайсом (каждые ~200мс), закрывает встречную позицию reduceOnly post-only, затем открывает новую.
+## Быстрый старт (Render Blueprints)
+1) Подключите репозиторий к Render.
+2) Убедитесь, что в корне лежит `render.yaml` (этот файл готов).
+3) В Render нажмите **New > Blueprint**, выберите этот репозиторий, подтвердите конфигурацию.
+4) В настройках сервиса на вкладке **Environment** задайте значения для:
+   - `BINANCE_API_KEY` (secret)
+   - `BINANCE_API_SECRET` (secret)
+   - `TV_WEBHOOK_SECRET` (secret)
+   Остальные переменные уже заданы в `render.yaml` и могут быть изменены при необходимости.
+5) Деплой запустится автоматически. Health check: `GET /healthz`.
+6) Откройте UI: `https://<your-service>.onrender.com/orders.html?symbol=ETHUSDT`  
+   или просто корень `https://<your-service>.onrender.com/` (редирект на дашборд).
 
-## Локальный запуск
-1. `python3 -m venv .venv && source .venv/bin/activate`
-2. `pip install -r requirements.txt`
-3. Создай `.env` по `.env.example` и заполни ключи.
-4. `python main.py` (или `uvicorn main:app --reload`)
-5. Health-check: `curl http://127.0.0.1:8000/healthz`
-
-### Тест ручного вызова
-curl -X POST http://127.0.0.1:8000/trade/manual
--H "Content-Type: application/json"
--d '{"symbol":"ETHUSDT","side":"long","qty":0.02}'
-
-bash
-Copy
-Edit
-
-### TradingView
-В Alert: Webhook URL = `https://<render-app-url>/tv/webhook`  
-Payload (JSON):
-{"symbol":"ETHUSDT","side":"short","secret":"<TV_WEBHOOK_SECRET>"}
-
-markdown
-Copy
-Edit
-
-## Деплой на Render
-1. Залей репозиторий на GitHub.
-2. На Render -> New -> Web Service -> выбери репо.
-3. Укажи `render.yaml` или вручную:
-   - Build Command: `pip install -r requirements.txt`
-   - Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-4. Добавь env vars (API ключи и SECRET).
-5. Дождись зелёного статуса. Проверь `/healthz`.
+## Webhook из TradingView
+- URL: `https://<your-service>.onrender.com/webhook`
+- Для доп. защиты используйте заголовок `X-Webhook-Secret: <TV_WEBHOOK_SECRET>` или поле `secret` в JSON.
+- Пример тела:
+```json
+{ "symbol": "ETHUSDT", "side": "long", "secret": "<TV_WEBHOOK_SECRET>" }
