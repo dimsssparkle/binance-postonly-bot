@@ -8,7 +8,7 @@ from order_manager import OrderManager
 from utils import parse_symbol_filters
 from config import (
     SYMBOL_DEFAULT, QTY_DEFAULT, LEVERAGE_DEFAULT, ORDER_TIMEOUT_MS, MAX_RETRIES, CLOSE_TIMEOUT_MS,
-    TV_WEBHOOK_SECRET, LOG_LEVEL, PORT, HEDGE_MODE
+    TV_WEBHOOK_SECRET, LOG_LEVEL, PORT, HEDGE_MODE, TP_PCT, SL_PCT
 )
 import time
 import uvicorn
@@ -33,8 +33,8 @@ _exchange_info = client.exchange_info()  # кэшируем filters
 
 # runtime-настройки TP/SL (по умолчанию включены, если проценты > 0)
 _runtime_opts = {
-    "tp_enabled": (os.getenv("TP_PCT", "0") not in ("0", "0.0", "0.00")),
-    "sl_enabled": (os.getenv("SL_PCT", "0") not in ("0", "0.0", "0.00")),
+    "tp_enabled": (float(TP_PCT or 0.0) > 0.0),
+    "sl_enabled": (float(SL_PCT or 0.0) > 0.0),
 }
 
 _locks: dict[str, Lock] = {}
