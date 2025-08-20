@@ -19,7 +19,7 @@ from starlette.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, HTMLResponse
 import asyncio
 
-
+from threading import Lock
 
 # Настроим логирование до первого использования логгера
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -31,7 +31,12 @@ app = FastAPI(title="Binance Post-Only Bot", version="1.0.0")
 client = BinanceFutures()
 _exchange_info = client.exchange_info()  # кэшируем filters
 
-from threading import Lock
+# runtime-настройки TP/SL (по умолчанию включены, если проценты > 0)
+_runtime_opts = {
+    "tp_enabled": (os.getenv("TP_PCT", "0") not in ("0", "0.0", "0.00")),
+    "sl_enabled": (os.getenv("SL_PCT", "0") not in ("0", "0.0", "0.00")),
+}
+
 _locks: dict[str, Lock] = {}
 
 def _lock_for(symbol: str) -> Lock:
@@ -80,6 +85,12 @@ class ManualPayload(BaseModel):
 class ClosePayload(BaseModel):
     side: Optional[str] = None  # можно не передавать
 
+class TpSlSettingsPayload(BaseModel):
+    tp_enabled: Optional[bool] = None
+    sl_enabled: Optional[bool] = None
+    symbol: Optional[str] = None  # для применения "отключения" к конкретному символу при очистке выходов
+
+
 def build_manager(symbol: str, qty_default: float) -> OrderManager:
     filters = parse_symbol_filters(_exchange_info, symbol)
     om = OrderManager(
@@ -91,9 +102,11 @@ def build_manager(symbol: str, qty_default: float) -> OrderManager:
         order_timeout_ms=ORDER_TIMEOUT_MS,
         max_retries=MAX_RETRIES,
         close_timeout_ms=CLOSE_TIMEOUT_MS,
-        min_notional=filters["minNotional"],
+        tp_enabled=_runtime_opts["tp_enabled"],
+        sl_enabled=_runtime_opts["sl_enabled"],
     )
     return om
+
 
 
 def ensure_symbol_setup(symbol: str) -> None:
@@ -488,6 +501,42 @@ app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 def orders_redirect(symbol: Optional[str] = None):
     q = f"?symbol={symbol}" if symbol else ""
     return RedirectResponse(url=f"/orders.html{q}")
+
+
+@app.get("/settings/tpsl")
+def get_tpsl_settings():
+    return {
+        "tp_enabled": _runtime_opts["tp_enabled"],
+        "sl_enabled": _runtime_opts["sl_enabled"],
+        "tp_pct": TP_PCT,
+        "sl_pct": SL_PCT,
+    }
+
+@app.post("/settings/tpsl")
+def set_tpsl_settings(payload: TpSlSettingsPayload):
+    changed = False
+    if payload.tp_enabled is not None:
+        _runtime_opts["tp_enabled"] = bool(payload.tp_enabled)
+        changed = True
+    if payload.sl_enabled is not None:
+        _runtime_opts["sl_enabled"] = bool(payload.sl_enabled)
+        changed = True
+
+    # Если что-то выключили — очищаем текущие TP/SL по символу (по умолчанию SYMBOL_DEFAULT)
+    symbol = (payload.symbol or SYMBOL_DEFAULT).upper()
+    if changed and (not _runtime_opts["tp_enabled"] or not _runtime_opts["sl_enabled"]):
+        try:
+            om = build_manager(symbol, QTY_DEFAULT)
+            om.cancel_exit_orders()
+        except Exception as e:
+            log.warning(f"[SETTINGS] cancel exits failed for {symbol}: {e}", exc_info=True)
+
+    return {
+        "status": "ok",
+        "tp_enabled": _runtime_opts["tp_enabled"],
+        "sl_enabled": _runtime_opts["sl_enabled"],
+        "symbol": symbol,
+    }
 
 
 

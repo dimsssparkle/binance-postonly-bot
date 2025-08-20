@@ -28,6 +28,7 @@
     input[type=text]{padding:6px 8px;border:1px solid #2a2d33;border-radius:8px;background:transparent;color:var(--fg)}
     button{padding:6px 10px;border:1px solid #2a2d33;border-radius:8px;background:#161a20;color:#fff;cursor:pointer}
     button:disabled{opacity:.6;cursor:not-allowed}
+    .toolbar label{display:flex;gap:6px;align-items:center}
   </style>
 </head>
 <body>
@@ -53,19 +54,23 @@
       <pre id="book">loading…</pre>
     </div>
 
-    <!-- NEW: Actions + NET PnL -->
     <div class="card" style="flex:1 1 380px;min-width:320px">
       <h3>Actions</h3>
 <!--       <div class="toolbar">
         <button id="dcaBtn">DCA</button>
         <button id="closeBtn">CLOSE</button>
       </div> -->
+      <div class="toolbar" style="margin-top:4px">
+        <label><input type="checkbox" id="tpToggle" /> TP</label>
+        <label><input type="checkbox" id="slToggle" /> SL</label>
+        <small id="tpslHint"></small>
+      </div>
       <div style="margin-top:8px">
         <strong>NET PnL (last 50):</strong>
         <span id="netPnL">—</span>
       </div>
     </div>
-  </div>
+
 
 
   <h3 style="margin:18px 0 8px">Closed Positions (round trips)</h3>
@@ -109,6 +114,10 @@ const tbody=document.querySelector('#hist tbody');
 const symInput=document.getElementById('symbolInput');
 const applyBtn=document.getElementById('applyBtn');
 const netPnlEl=document.getElementById('netPnL');
+const tpToggle=document.getElementById('tpToggle');
+const slToggle=document.getElementById('slToggle');
+const tpslHint=document.getElementById('tpslHint');
+
 
 
 let sym = (qs("symbol","ETHUSDT")+"").toUpperCase();
@@ -152,6 +161,41 @@ function renderHistory(rows){
 }
 
 
+async function loadTpSl(){
+  try{
+    const r = await fetch('/settings/tpsl');
+    const j = await r.json();
+    if (tpToggle) tpToggle.checked = !!j.tp_enabled;
+    if (slToggle) slToggle.checked = !!j.sl_enabled;
+    if (tpslHint) tpslHint.textContent = `(TP=${j.tp_pct}, SL=${j.sl_pct})`;
+  }catch(e){}
+}
+
+async function saveTpSl(){
+  try{
+    const body = { tp_enabled: tpToggle.checked, sl_enabled: slToggle.checked, symbol: sym };
+    const r = await fetch('/settings/tpsl', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    await r.json();
+  }catch(e){}
+}
+
+if (tpToggle) tpToggle.addEventListener('change', async ()=>{
+  tpToggle.disabled = true; slToggle.disabled = true;
+  await saveTpSl();
+  tpToggle.disabled = false; slToggle.disabled = false;
+});
+if (slToggle) slToggle.addEventListener('change', async ()=>{
+  tpToggle.disabled = true; slToggle.disabled = true;
+  await saveTpSl();
+  tpToggle.disabled = false; slToggle.disabled = false;
+});
+
+
+
 async function loadAll(){
   try{
     const a = await fetch(`/orders/open?symbol=${encodeURIComponent(sym)}`);
@@ -172,7 +216,9 @@ applyBtn.onclick = ()=>{
 }
 
 loadAll();
+loadTpSl();
 setInterval(loadAll, 5000);
+
 </script>
 </body>
 </html>

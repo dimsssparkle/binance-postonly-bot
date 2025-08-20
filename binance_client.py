@@ -185,21 +185,20 @@ class BinanceFutures:
 
     def get_position_overview(self, symbol: str) -> Dict[str, Any]:
         """
-        Возвращает компактный снэпшот позиции по символу для UI-блока Position.
-        В ответе ТОЛЬКО нужные поля:
+        Снэпшот позиции для блока Position — только нужные поля:
           - symbol
           - side ("LONG"/"SHORT" или "")
           - positionAmt
           - entryPrice
           - markPrice
           - unRealizedProfit
-          - leverage
+          - leverage              (если не удаётся прочитать — падение на LEVERAGE_DEFAULT)
           - isolatedWallet
           - liquidationPrice
-          - positionInitialMargin
-          - openOrderInitialMargin
-          - maintMargin
+          - positionMargin        (единое поле вместо positionInitialMargin/openOrderInitialMargin/maintMargin)
         """
+        from config import LEVERAGE_DEFAULT  # локальный импорт, чтобы избежать циклов
+
         sym = symbol.upper()
 
         snap: Dict[str, Any] = {
@@ -211,9 +210,10 @@ class BinanceFutures:
             "leverage": "0",
             "isolatedWallet": "0",
             "liquidationPrice": "0",
-            "positionInitialMargin": "0",
-            "openOrderInitialMargin": "0",
-            "maintMargin": "0",
+            # внутренние поля для расчёта единой маржи
+            "_positionInitialMargin": "0",
+            "_openOrderInitialMargin": "0",
+            "_maintMargin": "0",
         }
 
         # 1) /account -> positions (даёт leverage, isolatedWallet, initialMargins)
@@ -226,19 +226,19 @@ class BinanceFutures:
                         return str(v) if v is not None else default
 
                     snap.update({
-                        "positionAmt":            S("positionAmt",            snap["positionAmt"]),
-                        "entryPrice":             S("entryPrice",             snap["entryPrice"]),
-                        "unRealizedProfit":       S("unrealizedProfit",       snap["unRealizedProfit"]),  # из /account
-                        "leverage":               S("leverage",               snap["leverage"]),
-                        "isolatedWallet":         S("isolatedWallet",         snap["isolatedWallet"]),
-                        "positionInitialMargin":  S("positionInitialMargin",  snap["positionInitialMargin"]),
-                        "openOrderInitialMargin": S("openOrderInitialMargin", snap["openOrderInitialMargin"]),
+                        "positionAmt":                 S("positionAmt",                 snap["positionAmt"]),
+                        "entryPrice":                  S("entryPrice",                  snap["entryPrice"]),
+                        "unRealizedProfit":            S("unrealizedProfit",            snap["unRealizedProfit"]),  # из /account
+                        "leverage":                    S("leverage",                    snap["leverage"]),
+                        "isolatedWallet":              S("isolatedWallet",              snap["isolatedWallet"]),
+                        "_positionInitialMargin":      S("positionInitialMargin",       snap["_positionInitialMargin"]),
+                        "_openOrderInitialMargin":     S("openOrderInitialMargin",      snap["_openOrderInitialMargin"]),
                     })
                     break
         except Exception:
             pass
 
-        # 2) /positionRisk (markPrice, liquidationPrice, maintMargin и иногда точнее entry/amt/unRealizedProfit)
+        # 2) /positionRisk (markPrice, liquidationPrice, maintMargin и иногда точнее entry/amt/unRealizedProfit/leverage)
         try:
             gpr = getattr(self.client, "get_position_risk", None)
             if callable(gpr):
@@ -251,7 +251,7 @@ class BinanceFutures:
                         upd = {
                             "markPrice":        SR("markPrice",        snap["markPrice"]),
                             "liquidationPrice": SR("liquidationPrice", snap["liquidationPrice"]),
-                            "maintMargin":      SR("maintMargin",      snap["maintMargin"]),
+                            "_maintMargin":     SR("maintMargin",      snap["_maintMargin"]),
                             "unRealizedProfit": SR("unRealizedProfit", snap["unRealizedProfit"]),
                             "positionAmt":      SR("positionAmt",      snap["positionAmt"]),
                             "entryPrice":       SR("entryPrice",       snap["entryPrice"]),
@@ -271,7 +271,36 @@ class BinanceFutures:
         except Exception:
             side = ""
 
-        # 4) Очищенный ответ
+        # 4) leverage fallback — если всё ещё "0", подставляем LEVERAGE_DEFAULT
+        lev = str(snap.get("leverage", "0") or "0")
+        if lev in ("", "0", "0.0", "0.00"):
+            try:
+                # попытка прочитать через наш helper
+                alt = str(self.get_symbol_leverage(sym) or "")
+                if alt not in ("", "0", "0.0", "0.00"):
+                    lev = alt
+                else:
+                    lev = str(LEVERAGE_DEFAULT)
+            except Exception:
+                lev = str(LEVERAGE_DEFAULT)
+        snap["leverage"] = lev
+
+        # 5) Единое поле маржи позиции: берём maintMargin, если >0, иначе positionInitialMargin, иначе openOrderInitialMargin
+        try:
+            mm  = float(snap.get("_maintMargin", "0") or 0)
+            pim = float(snap.get("_positionInitialMargin", "0") or 0)
+            oim = float(snap.get("_openOrderInitialMargin", "0") or 0)
+            if mm > 0:
+                position_margin = mm
+            elif pim > 0:
+                position_margin = pim
+            else:
+                position_margin = oim
+            position_margin_str = f"{position_margin:.10f}".rstrip('0').rstrip('.')
+        except Exception:
+            position_margin_str = "0"
+
+        # 6) Очищенный ответ
         return {
             "symbol": snap["symbol"],
             "side": side,
@@ -282,10 +311,9 @@ class BinanceFutures:
             "leverage": snap["leverage"],
             "isolatedWallet": snap["isolatedWallet"],
             "liquidationPrice": snap["liquidationPrice"],
-            "positionInitialMargin": snap["positionInitialMargin"],
-            "openOrderInitialMargin": snap["openOrderInitialMargin"],
-            "maintMargin": snap["maintMargin"],
+            "positionMargin": position_margin_str,
         }
+
 
 
     # --- Helpers ---

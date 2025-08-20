@@ -14,7 +14,8 @@ Side = Literal["BUY", "SELL"]
 class OrderManager:
     def __init__(self, client: BinanceFutures, symbol: str, qty_default: float,
                  tick_size: str, step_size: str, order_timeout_ms: int, max_retries: int,
-                 close_timeout_ms: int | None = None, min_notional: str | None = None):
+                 close_timeout_ms: int | None = None,
+                 tp_enabled: bool = True, sl_enabled: bool = True):
         self.client = client
         self.symbol = symbol
         self.qty_default = qty_default
@@ -23,7 +24,10 @@ class OrderManager:
         self.order_timeout_ms = order_timeout_ms
         self.max_retries = max_retries
         self.close_timeout_ms = close_timeout_ms or (self.order_timeout_ms * 2)
-        self.min_notional = float(min_notional or 0)
+        # runtime-флаги для включения/выключения TP/SL
+        self.tp_enabled = tp_enabled
+        self.sl_enabled = sl_enabled
+
 
 
     def get_entry_price(self) -> float:
@@ -61,14 +65,32 @@ class OrderManager:
             except Exception:
                 entry_price = 0.0
 
-        # Быстрый выход, если TP/SL выключены
         tp_pct = float(TP_PCT or 0.0)
         sl_pct = float(SL_PCT or 0.0)
-        if tp_pct <= 0 and sl_pct <= 0:
+
+        # runtime-флаги + проценты из конфига
+        tp_on = self.tp_enabled and (tp_pct > 0)
+        sl_on = self.sl_enabled and (sl_pct > 0)
+
+        # если оба выключены — быстро выходим
+        if not tp_on and not sl_on:
             return placed
 
-        # Готовые округлённые триггеры
-        tp_price_str, sl_price_str = self._exit_prices(entry_price, side)
+        # расчёт цен триггеров
+        if entry_price > 0:
+            if side == "BUY":  # long
+                tp_price = entry_price * (1.0 + tp_pct) if tp_on else None
+                sl_price = entry_price * (1.0 - sl_pct) if sl_on else None
+            else:              # short
+                tp_price = entry_price * (1.0 - tp_pct) if tp_on else None
+                sl_price = entry_price * (1.0 + sl_pct) if sl_on else None
+        else:
+            tp_price = None
+            sl_price = None
+
+        # округление по tickSize
+        tp_price_str = round_to_step(tp_price, self.tick_size) if tp_price else None
+        sl_price_str = round_to_step(sl_price, self.tick_size) if sl_price else None
 
         # --- TP: TAKE_PROFIT_MARKET closePosition=True
         if tp_price_str:
@@ -101,6 +123,7 @@ class OrderManager:
                 log.warning(f"[SL place] failed: {e}", exc_info=True)
 
         return placed
+
 
 
     # -------- Price helpers for maker placement --------
