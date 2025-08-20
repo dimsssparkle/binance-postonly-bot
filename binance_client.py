@@ -185,13 +185,20 @@ class BinanceFutures:
 
     def get_position_overview(self, symbol: str) -> Dict[str, Any]:
         """
-        Возвращает «максимально полный» снэпшот позиции по символу, объединяя данные из:
-          - GET /fapi/v2/account (acc['positions'])
-          - GET /fapi/v2/positionRisk (get_position_risk)
-
-        Дополнительно:
-          - если leverage от биржи = 0, а режим фактически изолированный, считаем «эффективное» плечо: abs(notional)/isolatedWallet
-          - если marginType не пришёл, выводим ISOLATED, если isolatedWallet > 0
+        Возвращает компактный снэпшот позиции по символу для UI-блока Position.
+        В ответе ТОЛЬКО нужные поля:
+          - symbol
+          - side ("LONG"/"SHORT" или "")
+          - positionAmt
+          - entryPrice
+          - markPrice
+          - unRealizedProfit
+          - leverage
+          - isolatedWallet
+          - liquidationPrice
+          - positionInitialMargin
+          - openOrderInitialMargin
+          - maintMargin
         """
         sym = symbol.upper()
 
@@ -200,22 +207,16 @@ class BinanceFutures:
             "positionAmt": "0",
             "entryPrice": "0",
             "markPrice": "0",
-            "notional": "0",
             "unRealizedProfit": "0",
-            "unrealizedProfit": "0",
             "leverage": "0",
-            "isolated": None,          # True/False/None
             "isolatedWallet": "0",
-            "marginType": "",
             "liquidationPrice": "0",
             "positionInitialMargin": "0",
             "openOrderInitialMargin": "0",
             "maintMargin": "0",
-            "positionSide": "",
-            "updateTime": 0,
         }
 
-        # 1) /account -> positions (часто даёт корректный leverage даже без позиции)
+        # 1) /account -> positions (даёт leverage, isolatedWallet, initialMargins)
         try:
             acc = self.client.account() or {}
             for p in acc.get("positions", []):
@@ -227,24 +228,17 @@ class BinanceFutures:
                     snap.update({
                         "positionAmt":            S("positionAmt",            snap["positionAmt"]),
                         "entryPrice":             S("entryPrice",             snap["entryPrice"]),
-                        "unrealizedProfit":       S("unrealizedProfit",       snap["unrealizedProfit"]),
-                        "notional":               S("notional",               snap["notional"]),
+                        "unRealizedProfit":       S("unrealizedProfit",       snap["unRealizedProfit"]),  # из /account
                         "leverage":               S("leverage",               snap["leverage"]),
                         "isolatedWallet":         S("isolatedWallet",         snap["isolatedWallet"]),
                         "positionInitialMargin":  S("positionInitialMargin",  snap["positionInitialMargin"]),
                         "openOrderInitialMargin": S("openOrderInitialMargin", snap["openOrderInitialMargin"]),
-                        "positionSide":           S("positionSide",           snap["positionSide"]),
                     })
-                    iso = p.get("isolated")
-                    if isinstance(iso, bool):
-                        snap["isolated"] = iso
-                        snap["marginType"] = "ISOLATED" if iso else "CROSSED"
-                    snap["unRealizedProfit"] = snap["unrealizedProfit"]
                     break
         except Exception:
             pass
 
-        # 2) /positionRisk (даёт markPrice, liq, иногда корректный leverage)
+        # 2) /positionRisk (markPrice, liquidationPrice, maintMargin и иногда точнее entry/amt/unRealizedProfit)
         try:
             gpr = getattr(self.client, "get_position_risk", None)
             if callable(gpr):
@@ -257,55 +251,41 @@ class BinanceFutures:
                         upd = {
                             "markPrice":        SR("markPrice",        snap["markPrice"]),
                             "liquidationPrice": SR("liquidationPrice", snap["liquidationPrice"]),
+                            "maintMargin":      SR("maintMargin",      snap["maintMargin"]),
                             "unRealizedProfit": SR("unRealizedProfit", snap["unRealizedProfit"]),
-                            "notional":         SR("notional",         snap["notional"]),
-                            "leverage":         SR("leverage",         snap["leverage"]),
                             "positionAmt":      SR("positionAmt",      snap["positionAmt"]),
                             "entryPrice":       SR("entryPrice",       snap["entryPrice"]),
+                            "leverage":         SR("leverage",         snap["leverage"]),
                         }
                         for k, v in upd.items():
                             if str(v) not in ("", "0", "0.0", "0.00"):
                                 snap[k] = v
-
-                        if snap["isolated"] is None and "isolated" in r:
-                            iso = r.get("isolated")
-                            if isinstance(iso, bool):
-                                snap["isolated"] = iso
-                                snap["marginType"] = "ISOLATED" if iso else "CROSSED"
-
-                        ut = r.get("updateTime")
-                        if isinstance(ut, int):
-                            snap["updateTime"] = ut
                         break
         except Exception:
             pass
 
-        # 3) Если marginType не определён, но есть признак изоляции по кошельку
+        # 3) side по знаку позиции
         try:
-            iw = float(snap.get("isolatedWallet", "0") or 0)
-            if snap["marginType"] == "":
-                if snap["isolated"] is None and iw > 0:
-                    snap["isolated"] = True
-                if isinstance(snap["isolated"], bool):
-                    snap["marginType"] = "ISOLATED" if snap["isolated"] else "CROSSED"
-                elif iw > 0:
-                    snap["marginType"] = "ISOLATED"
+            amt = float(snap.get("positionAmt", "0") or 0)
+            side = "LONG" if amt > 0 else ("SHORT" if amt < 0 else "")
         except Exception:
-            pass
+            side = ""
 
-        # 4) Fallback для leverage: если биржа отдаёт "0", считаем из notional/isolatedWallet (только для ISOLATED)
-        try:
-            lev = str(snap.get("leverage", "") or "")
-            if lev in ("", "0", "0.0", "0.00"):
-                notional = abs(float(snap.get("notional", "0") or 0))
-                iw = float(snap.get("isolatedWallet", "0") or 0)
-                if snap.get("marginType") == "ISOLATED" and iw > 0 and notional > 0:
-                    eff = notional / iw
-                    snap["leverage"] = str(int(round(eff))) if eff >= 1 else "1"
-        except Exception:
-            pass
-
-        return snap
+        # 4) Очищенный ответ
+        return {
+            "symbol": snap["symbol"],
+            "side": side,
+            "positionAmt": snap["positionAmt"],
+            "entryPrice": snap["entryPrice"],
+            "markPrice": snap["markPrice"],
+            "unRealizedProfit": snap["unRealizedProfit"],
+            "leverage": snap["leverage"],
+            "isolatedWallet": snap["isolatedWallet"],
+            "liquidationPrice": snap["liquidationPrice"],
+            "positionInitialMargin": snap["positionInitialMargin"],
+            "openOrderInitialMargin": snap["openOrderInitialMargin"],
+            "maintMargin": snap["maintMargin"],
+        }
 
 
     # --- Helpers ---
@@ -368,4 +348,3 @@ class BinanceFutures:
         commissionAsset, time, buyer, maker, positionSide и т.д.
         """
         return self.client.get_account_trades(symbol=symbol, startTime=startTime, endTime=endTime, limit=limit)
-
