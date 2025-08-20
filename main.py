@@ -1,7 +1,7 @@
 import os
 import logging
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Request, Body
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, field_validator
 from binance_client import BinanceFutures
 from order_manager import OrderManager
@@ -16,7 +16,7 @@ import json
 from signal_router import SignalRouter
 
 from starlette.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 import asyncio
 
 from threading import Lock
@@ -104,9 +104,9 @@ def build_manager(symbol: str, qty_default: float) -> OrderManager:
         close_timeout_ms=CLOSE_TIMEOUT_MS,
         tp_enabled=_runtime_opts["tp_enabled"],
         sl_enabled=_runtime_opts["sl_enabled"],
+        min_notional=float(filters["minNotional"]),
     )
     return om
-
 
 
 def ensure_symbol_setup(symbol: str) -> None:

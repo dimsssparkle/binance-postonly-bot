@@ -15,7 +15,8 @@ class OrderManager:
     def __init__(self, client: BinanceFutures, symbol: str, qty_default: float,
                  tick_size: str, step_size: str, order_timeout_ms: int, max_retries: int,
                  close_timeout_ms: int | None = None,
-                 tp_enabled: bool = True, sl_enabled: bool = True):
+                 tp_enabled: bool = True, sl_enabled: bool = True,
+                 min_notional: float | str = 0):
         self.client = client
         self.symbol = symbol
         self.qty_default = qty_default
@@ -27,6 +28,12 @@ class OrderManager:
         # runtime-флаги для включения/выключения TP/SL
         self.tp_enabled = tp_enabled
         self.sl_enabled = sl_enabled
+        # MIN_NOTIONAL из exchangeInfo (нужен в _ensure_min_notional_qty)
+        try:
+            self.min_notional = float(min_notional)
+        except Exception:
+            self.min_notional = 0.0
+
 
 
 

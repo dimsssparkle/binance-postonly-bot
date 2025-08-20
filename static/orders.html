@@ -125,12 +125,12 @@ symInput.value = sym;
 
 function renderPosition(data){
   symEl.textContent = data.symbol || sym;
-  levEl.textContent = "x" + ((data.position && data.position.leverage) ? data.position.leverage : "—")
-                      + (data.position && data.position.marginType ? (" "+data.position.marginType) : "");
+  levEl.textContent = "x" + ((data.position && data.position.leverage) ? data.position.leverage : "—");
   posEl.textContent = JSON.stringify(data.position||{}, null, 2);
   bookEl.textContent = JSON.stringify(data.book||{}, null, 2);
   tsEl.textContent = "Updated: " + fmtTs(data.ts);
 }
+
 
 function renderHistory(rows){
   tbody.innerHTML = "";
