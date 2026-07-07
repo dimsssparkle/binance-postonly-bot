@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bot-v2",
+      "runtimeExecutable": ".venv311/bin/uvicorn",
+      "runtimeArgs": ["app.main:app", "--host", "0.0.0.0", "--port", "8010"],
+      "port": 8010
+    }
+  ]
+}

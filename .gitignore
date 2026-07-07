@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+# App v2 runtime SQLite state (local dev only — never commit real bot state)
+*.db
+*.db-shm
+*.db-wal
+
 # Distribution / packaging
 .Python
 build/

@@ -3,3 +3,5 @@ uvicorn[standard]==0.30.6
 pydantic==2.9.2
 binance-futures-connector==4.1.0
 python-dotenv==1.0.1
+aiosqlite==0.20.0
+websockets==15.0.1

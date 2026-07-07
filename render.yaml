@@ -6,7 +6,7 @@ services:
     numInstances: 1
     healthCheckPath: /healthz
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -23,30 +23,20 @@ services:
       - key: LEVERAGE_DEFAULT
         value: "10"
       - key: ORDER_TIMEOUT_MS
-        value: "200"
-      - key: MAX_RETRIES
-        value: "25"
+        value: "750"
       - key: CLOSE_TIMEOUT_MS
         value: "2500"
+      - key: MAX_MAKER_ATTEMPTS
+        value: "3"
+      - key: MAX_CLOSE_RETRIES
+        value: "25"
       - key: HEDGE_MODE
         value: off
-      - key: TV_WEBHOOK_SECRET
-        sync: false
       - key: LOG_LEVEL
         value: INFO
       - key: TP_PCT
         value: "0.0023"
       - key: SL_PCT
         value: "0.0015"
-      - key: POSTONLY_MARKET_AFTER
-        value: "3"
-      - key: SPAM_WINDOW_SEC
-        value: "75"
-      - key: SPAM_COUNT
-        value: "4"
-      - key: SPAM_FLIPS
-        value: "3"
-      - key: SPAM_MIN_HOLD_SEC
-        value: "30"
-      - key: SPAM_HYSTERESIS_SEC
-        value: "50"
+      - key: DB_PATH
+        value: bot.db
