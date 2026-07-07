@@ -67,9 +67,16 @@ class ExecutionEngine:
     async def handle_signal(self, side: Side, qty: Optional[str] = None) -> Intent:
         active = await self.intents.get_active(self.symbol)
         if active is not None:
-            raise EngineBusyError(
-                f"intent #{active.id} already active for {self.symbol} in state {active.state.value}"
-            )
+            if active.state != IntentState.OPEN:
+                raise EngineBusyError(
+                    f"intent #{active.id} already active for {self.symbol} in state {active.state.value}"
+                )
+            # OPEN is a steady state, not "in-flight" — a new signal (including
+            # a close/FLAT signal) supersedes it. Mark it resolved so the new
+            # intent doesn't collide with the one-active-intent-per-symbol index;
+            # the new intent's own _cancel_exits/_close_opposite steps handle
+            # the actual exchange-side cleanup of the position it's superseding.
+            await self.intents.update_state(active.id, IntentState.FLAT)
 
         qty_val = qty or self.qty_default
         intent = await self.intents.create(self.symbol, side, qty_val)
@@ -111,7 +118,11 @@ class ExecutionEngine:
         try:
             self.rest.cancel_all_open_orders(intent.symbol)
         except ClientError as e:
-            log.warning(f"[CANCEL EXITS] failed (ignored): {e}")
+            log.warning(f"[CANCEL EXITS] cancel_all_open_orders failed (ignored): {e}")
+        try:
+            self.rest.cancel_all_algo_orders(intent.symbol)
+        except ClientError as e:
+            log.warning(f"[CANCEL EXITS] cancel_all_algo_orders failed (ignored): {e}")
         await self.events.append("engine", "state_transition", {"to": "cancelling_exits"}, intent.id)
 
     # ------------------------------------------------------------------ #

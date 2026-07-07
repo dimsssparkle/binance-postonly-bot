@@ -54,21 +54,38 @@ class BinanceRestClient:
             reduceOnly=reduce_only, newClientOrderId=new_client_order_id,
         )
 
+    # --- Algo orders (conditional TP/SL) ---
+    # Binance migrated STOP_MARKET/TAKE_PROFIT_MARKET conditional orders off
+    # /fapi/v1/order onto a dedicated Algo Order API on 2025-12-09 (error -4120
+    # otherwise). binance-futures-connector==4.1.0 predates this, so these
+    # calls are made directly via the client's signing helper.
+    def _place_algo_order(self, symbol: str, side: str, order_type: str, trigger_price: str,
+                           client_algo_id: Optional[str] = None):
+        payload: Dict[str, Any] = {
+            "algoType": "CONDITIONAL",
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "triggerPrice": trigger_price,
+            "closePosition": "true",
+        }
+        if client_algo_id:
+            payload["clientAlgoId"] = client_algo_id
+        return self.client.sign_request("POST", "/fapi/v1/algoOrder", payload)
+
     def place_take_profit_market(self, symbol: str, side: str, stop_price: str,
                                   new_client_order_id: Optional[str] = None):
-        return self.client.new_order(
-            symbol=symbol, side=side, type="TAKE_PROFIT_MARKET",
-            stopPrice=stop_price, closePosition=True,
-            newClientOrderId=new_client_order_id,
-        )
+        return self._place_algo_order(symbol, side, "TAKE_PROFIT_MARKET", stop_price, new_client_order_id)
 
     def place_stop_market(self, symbol: str, side: str, stop_price: str,
                            new_client_order_id: Optional[str] = None):
-        return self.client.new_order(
-            symbol=symbol, side=side, type="STOP_MARKET",
-            stopPrice=stop_price, closePosition=True,
-            newClientOrderId=new_client_order_id,
-        )
+        return self._place_algo_order(symbol, side, "STOP_MARKET", stop_price, new_client_order_id)
+
+    def cancel_all_algo_orders(self, symbol: str):
+        return self.client.sign_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+
+    def list_algo_open_orders(self, symbol: str):
+        return self.client.sign_request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
 
     def cancel_order(self, symbol: str, order_id: int | None = None, orig_client_order_id: str | None = None):
         return self.client.cancel_order(symbol=symbol, orderId=order_id, origClientOrderId=orig_client_order_id)
@@ -80,7 +97,7 @@ class BinanceRestClient:
         return self.client.query_order(symbol=symbol, orderId=order_id, origClientOrderId=orig_client_order_id)
 
     def list_open_orders(self, symbol: str):
-        return self.client.get_open_orders(symbol=symbol.upper()) or []
+        return self.client.get_orders(symbol=symbol.upper()) or []
 
     def book_ticker(self, symbol: str) -> Dict[str, Any]:
         return self.client.book_ticker(symbol=symbol)
