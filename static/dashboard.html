@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<title>Binance Bot v2 — Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --ink: #1a1d23;
+    --ink-soft: #5b6270;
+    --ink-faint: #9096a2;
+    --rule: #e2e5ea;
+    --accent: #2f6f63;
+    --accent-soft: #e4f0ec;
+    --done: #2e7d47;
+    --done-bg: #e6f4ea;
+    --open: #2f6f63;
+    --open-bg: #e4f0ec;
+    --pending: #a5720e;
+    --pending-bg: #f6ecd6;
+    --failed: #b3392c;
+    --failed-bg: #f8e6e3;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101216;
+      --panel: #171a1f;
+      --ink: #e6e8eb;
+      --ink-soft: #a3a9b3;
+      --ink-faint: #6b7178;
+      --rule: #262b33;
+      --accent: #6fbfae;
+      --accent-soft: #17302c;
+      --done: #6fbf83;
+      --done-bg: #17291c;
+      --open: #6fbfae;
+      --open-bg: #16302b;
+      --pending: #d9a64b;
+      --pending-bg: #2e2717;
+      --failed: #e08a7a;
+      --failed-bg: #2e1e1b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 64px; }
+
+  header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+  header h1 { font-size: 19px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 10px; }
+  .pill { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 100px; background: var(--panel); border: 1px solid var(--rule); color: var(--ink-soft); }
+  .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-faint); }
+  .conn .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-faint); }
+  .conn.live .dot { background: var(--done); }
+  .conn.down .dot { background: var(--failed); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 16px 18px; }
+  .card h2 { font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint); margin: 0 0 14px; font-weight: 600; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13.5px; }
+  .kv dt { color: var(--ink-faint); }
+  .kv dd { margin: 0; font-family: var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+  .kv dd.big { font-size: 17px; font-weight: 600; }
+  .pos-val { color: var(--done); }
+  .neg-val { color: var(--failed); }
+
+  .actions { display: flex; flex-direction: column; gap: 10px; }
+  .actions .row { display: flex; gap: 8px; }
+  .qty-row { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-soft); }
+  input[type=number] {
+    width: 90px; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--rule);
+    background: var(--bg); color: var(--ink); font-family: var(--mono); font-size: 13px;
+  }
+  button {
+    flex: 1; padding: 9px 12px; border-radius: 7px; border: 1px solid var(--rule);
+    background: var(--panel); color: var(--ink); font-size: 13.5px; font-weight: 600; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.long { color: var(--done); }
+  button.short { color: var(--failed); }
+  button.close { color: var(--ink-soft); }
+  .action-msg { font-size: 12.5px; color: var(--ink-faint); min-height: 1.4em; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint); font-weight: 600; padding: 0 8px 8px; border-bottom: 1px solid var(--rule); }
+  td { padding: 8px 8px; border-bottom: 1px solid var(--rule); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  .table-scroll { overflow-x: auto; }
+
+  .state-pill { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 100px; white-space: nowrap; }
+  .state-open, .state-placing_exits { color: var(--open); background: var(--open-bg); }
+  .state-flat { color: var(--ink-faint); background: var(--rule); }
+  .state-failed { color: var(--failed); background: var(--failed-bg); }
+  .state-new, .state-cancelling_exits, .state-closing_opposite, .state-entry_maker_pending, .state-entry_market_pending { color: var(--pending); background: var(--pending-bg); }
+
+  .events-list { display: flex; flex-direction: column; gap: 0; max-height: 340px; overflow-y: auto; }
+  .event-row { display: grid; grid-template-columns: 70px 90px 1fr; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--rule); font-size: 12.5px; align-items: baseline; }
+  .event-row:last-child { border-bottom: none; }
+  .event-time { color: var(--ink-faint); font-family: var(--mono); }
+  .event-source { color: var(--ink-soft); }
+  .event-kind { font-family: var(--mono); }
+
+  .empty { color: var(--ink-faint); font-size: 13px; padding: 8px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Binance Bot v2 <span class="pill" id="symPill">—</span> <span class="pill" id="levPill">x—</span></h1>
+    <span class="conn" id="connStatus"><span class="dot"></span><span id="connLabel">connecting…</span></span>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Позиция</h2>
+      <dl class="kv" id="posKv">
+        <dt>Сторона</dt><dd id="posSide">—</dd>
+        <dt>Объём</dt><dd id="posAmt">—</dd>
+        <dt>Вход</dt><dd id="posEntry">—</dd>
+        <dt>Маркет</dt><dd id="posMark">—</dd>
+        <dt>uPnL</dt><dd class="big" id="posPnl">—</dd>
+        <dt>Bid/Ask</dt><dd id="posBook">—</dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <h2>Действия <span style="text-transform:none;font-weight:400">(реальный счёт)</span></h2>
+      <div class="actions">
+        <div class="qty-row">
+          Qty: <input type="number" id="qtyInput" step="0.001" placeholder="по умолчанию"/>
+        </div>
+        <div class="row">
+          <button class="long" id="btnLong">LONG</button>
+          <button class="short" id="btnShort">SHORT</button>
+        </div>
+        <div class="row">
+          <button class="close" id="btnClose">CLOSE</button>
+        </div>
+        <div class="action-msg" id="actionMsg"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px">
+    <h2>Последние Intent-ы</h2>
+    <div class="table-scroll">
+      <table id="intentsTable">
+        <thead><tr>
+          <th>ID</th><th>Сторона</th><th>Qty</th><th>Состояние</th><th>Вход</th><th>Попыток</th><th>Обновлён</th>
+        </tr></thead>
+        <tbody><tr><td colspan="7" class="empty">загрузка…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Журнал событий</h2>
+    <div class="events-list" id="eventsList"><div class="empty">загрузка…</div></div>
+  </div>
+</div>
+
+<script>
+const qs = (k, d) => new URL(location.href).searchParams.get(k) || d;
+const sym = (qs("symbol", "ETHUSDT") + "").toUpperCase();
+
+const symPill = document.getElementById('symPill');
+const levPill = document.getElementById('levPill');
+const connStatus = document.getElementById('connStatus');
+const connLabel = document.getElementById('connLabel');
+
+function fmtTs(ms) { if (!ms) return "—"; return new Date(Number(ms)).toLocaleTimeString(); }
+function fmtNum(x, d) { if (x === null || x === undefined || x === "") return "—"; const n = Number(x); return isNaN(n) ? String(x) : n.toFixed(d ?? 4).replace(/\.?0+$/, m => m === '.' ? '' : m).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, ''); }
+function pnlClass(x) { return Number(x || 0) >= 0 ? 'pos-val' : 'neg-val'; }
+
+function renderPosition(p) {
+  if (!p) return;
+  symPill.textContent = p.symbol || sym;
+  const pos = p.position || {};
+  levPill.textContent = "x" + (pos.leverage || "—");
+  const amt = Number(pos.positionAmt || 0);
+  document.getElementById('posSide').textContent = amt > 0 ? 'LONG' : (amt < 0 ? 'SHORT' : 'FLAT');
+  document.getElementById('posAmt').textContent = fmtNum(Math.abs(amt), 4);
+  document.getElementById('posEntry').textContent = fmtNum(pos.entryPrice, 2);
+  document.getElementById('posMark').textContent = fmtNum(pos.markPrice, 2);
+  const pnlEl = document.getElementById('posPnl');
+  pnlEl.textContent = fmtNum(pos.unRealizedProfit, 4);
+  pnlEl.className = 'big ' + pnlClass(pos.unRealizedProfit);
+  const book = p.book || {};
+  document.getElementById('posBook').textContent = (book.bidPrice || "—") + " / " + (book.askPrice || "—");
+}
+
+function renderIntents(intents) {
+  const tbody = document.querySelector('#intentsTable tbody');
+  if (!intents || !intents.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">пока нет intent-ов</td></tr>'; return; }
+  tbody.innerHTML = intents.map(i => `
+    <tr>
+      <td>#${i.id}</td>
+      <td>${i.desired_side.toUpperCase()}</td>
+      <td>${fmtNum(i.qty, 4)}</td>
+      <td><span class="state-pill state-${i.state}">${i.state}</span></td>
+      <td>${fmtNum(i.entry_price, 2)}</td>
+      <td>${i.attempt_no}</td>
+      <td>${fmtTs(i.updated_at_ms)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderEvents(events) {
+  const list = document.getElementById('eventsList');
+  if (!events || !events.length) { list.innerHTML = '<div class="empty">пока нет событий</div>'; return; }
+  list.innerHTML = events.map(e => `
+    <div class="event-row">
+      <span class="event-time">${fmtTs(e.ts_ms)}</span>
+      <span class="event-source">${e.source}</span>
+      <span class="event-kind">${e.kind}${e.intent_id ? ' · #' + e.intent_id : ''}</span>
+    </div>
+  `).join('');
+}
+
+async function postAction(url, body, btns) {
+  const msgEl = document.getElementById('actionMsg');
+  btns.forEach(b => b.disabled = true);
+  msgEl.textContent = "отправка…";
+  try {
+    const r = await fetch(url, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {}) });
+    const j = await r.json();
+    if (!r.ok) { msgEl.textContent = "Ошибка: " + (j.detail || r.status); }
+    else { msgEl.textContent = "OK: intent #" + (j.intent && j.intent.id) + " → " + (j.intent && j.intent.state); }
+  } catch (e) {
+    msgEl.textContent = "Ошибка сети: " + e;
+  } finally {
+    btns.forEach(b => b.disabled = false);
+  }
+}
+
+const allBtns = [document.getElementById('btnLong'), document.getElementById('btnShort'), document.getElementById('btnClose')];
+const qtyInput = document.getElementById('qtyInput');
+
+document.getElementById('btnLong').onclick = () => {
+  if (!confirm('Открыть LONG на реальном счёте?')) return;
+  const qty = qtyInput.value ? Number(qtyInput.value) : undefined;
+  postAction('/trade/manual', { side: 'long', qty }, allBtns);
+};
+document.getElementById('btnShort').onclick = () => {
+  if (!confirm('Открыть SHORT на реальном счёте?')) return;
+  const qty = qtyInput.value ? Number(qtyInput.value) : undefined;
+  postAction('/trade/manual', { side: 'short', qty }, allBtns);
+};
+document.getElementById('btnClose').onclick = () => {
+  if (!confirm('Закрыть текущую позицию?')) return;
+  postAction('/trade/close', {}, allBtns);
+};
+
+let es;
+function connect() {
+  es = new EventSource(`/orders/stream?symbol=${encodeURIComponent(sym)}&interval_ms=2000`);
+  es.onopen = () => { connStatus.className = 'conn live'; connLabel.textContent = 'live'; };
+  es.onerror = () => { connStatus.className = 'conn down'; connLabel.textContent = 'переподключение…'; };
+  es.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      renderPosition(data.position);
+      renderIntents(data.intents);
+      renderEvents(data.events);
+    } catch (e) { console.warn('bad SSE payload', e); }
+  };
+}
+connect();
+</script>
+</body>
+</html>

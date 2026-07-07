@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv311/bin/uvicorn",
       "runtimeArgs": ["app.main:app", "--host", "0.0.0.0", "--port", "8010"],
       "port": 8010
+    },
+    {
+      "name": "hetzner-tunnel",
+      "runtimeExecutable": "ssh",
+      "runtimeArgs": ["-N", "-o", "ExitOnForwardFailure=yes", "-L", "8011:127.0.0.1:8000", "-i", "/Users/daniilsemenov/.ssh/id_ed25519_hetzner_bot", "root@65.109.175.194"],
+      "port": 8011
     }
   ]
 }

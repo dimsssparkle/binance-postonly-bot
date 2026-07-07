@@ -4,8 +4,11 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from starlette.staticfiles import StaticFiles
 
 from app.api.routes_control import router as control_router
+from app.api.routes_dashboard import router as dashboard_router
 from app.config import (
     CLOSE_TIMEOUT_MS, DB_PATH, HEDGE_MODE, LEVERAGE_DEFAULT, LOG_LEVEL,
     MAX_CLOSE_RETRIES, MAX_MAKER_ATTEMPTS, ORDER_TIMEOUT_MS, PORT, QTY_DEFAULT,
@@ -93,6 +96,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Binance Bot v2 (execution engine)", version="2.0.0", lifespan=lifespan)
 app.include_router(control_router)
+app.include_router(dashboard_router)
+app.mount("/static", StaticFiles(directory="static", html=True), name="static")
+
+
+@app.get("/")
+def root_redirect():
+    return RedirectResponse(url="/dashboard.html")
 
 
 if __name__ == "__main__":
