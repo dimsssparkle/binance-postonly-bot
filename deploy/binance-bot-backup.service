@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup bot.db (SQLite consistent snapshot + rotation)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bot
+Environment=DB_PATH=/opt/bot/bot.db
+Environment=BACKUP_DIR=/opt/bot/backups
+Environment=BACKUP_KEEP_LAST=14
+ExecStart=/opt/bot/.venv/bin/python3 /opt/bot/scripts/backup_db.py
