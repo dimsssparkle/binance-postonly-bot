@@ -245,6 +245,27 @@ class ListenKeyRepository:
         )
         await self._conn.commit()
 
+
+class SettingsRepository:
+    """Персистентные runtime-настройки (переопределяют .env после первого
+    сохранения через дашборд) — key/value в schema_meta."""
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def get(self, key: str) -> Optional[str]:
+        cur = await self._conn.execute("SELECT value FROM schema_meta WHERE key = ?", (key,))
+        row = await cur.fetchone()
+        return row["value"] if row else None
+
+    async def set(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            """INSERT INTO schema_meta (key, value) VALUES (?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (key, value),
+        )
+        await self._conn.commit()
+
     async def mark_renewed(self) -> None:
         await self._conn.execute(
             "UPDATE listen_key_state SET last_renewed_ms = ? WHERE id = 1", (_now_ms(),)

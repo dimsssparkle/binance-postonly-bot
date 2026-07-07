@@ -23,6 +23,7 @@ from app.exchange.ws_userstream import UserDataStream
 from app.persistence.db import close_db, open_db
 from app.persistence.repository import (
     EventLogRepository, IntentOrderRepository, IntentRepository, ListenKeyRepository,
+    SettingsRepository,
 )
 from app.strategy.noop import NoopStrategy
 from app.strategy.runner import StrategyRunner
@@ -59,6 +60,12 @@ async def lifespan(app: FastAPI):
     orders = IntentOrderRepository(conn)
     events = EventLogRepository(conn)
     listen_keys = ListenKeyRepository(conn)
+    settings = SettingsRepository(conn)
+
+    saved_tp = await settings.get("tp_pct")
+    saved_sl = await settings.get("sl_pct")
+    tp_pct = float(saved_tp) if saved_tp is not None else TP_PCT
+    sl_pct = float(saved_sl) if saved_sl is not None else SL_PCT
 
     user_stream = UserDataStream(
         rest=rest, listen_keys=listen_keys, orders=orders, intents=intents, events=events,
@@ -78,8 +85,8 @@ async def lifespan(app: FastAPI):
         close_timeout_ms=CLOSE_TIMEOUT_MS,
         max_maker_attempts=MAX_MAKER_ATTEMPTS,
         max_close_retries=MAX_CLOSE_RETRIES,
-        tp_pct=TP_PCT,
-        sl_pct=SL_PCT,
+        tp_pct=tp_pct,
+        sl_pct=sl_pct,
         commission_rates=commission_rates,
     )
 
@@ -87,6 +94,7 @@ async def lifespan(app: FastAPI):
     app.state.rest = rest
     app.state.engine = engine
     app.state.user_stream = user_stream
+    app.state.settings = settings
 
     reconciler = Reconciler(engine)
     await reconciler.run()

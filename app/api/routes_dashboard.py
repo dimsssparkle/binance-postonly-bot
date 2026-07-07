@@ -30,13 +30,34 @@ def _intent_to_dict(intent: Intent) -> dict:
     }
 
 
-def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
+async def _net_unrealized_pnl(request: Request, sym: str, gross_pnl: float,
+                               mark_price: float, position_amt: float) -> Optional[str]:
+    """Gross uPnL минус фактическая комиссия входа (уже уплачена) минус
+    оценочная комиссия закрытия по текущей mark price (taker, TP/SL —
+    Algo Order). None, если нет активного intent-а — тогда делить не на что."""
+    engine = request.app.state.engine
+    intent = await engine.intents.get_active(sym)
+    if intent is None:
+        return None
+    try:
+        entry_fee = await engine.orders.sum_entry_commission(intent.id)
+        taker_rate = engine.commission_rates.get(sym)["taker"]
+    except Exception as e:
+        log.warning(f"[DASHBOARD] net pnl calc failed: {e}")
+        return None
+    exit_fee_est = abs(position_amt) * mark_price * taker_rate
+    net = gross_pnl - float(entry_fee) - exit_fee_est
+    return f"{net:.8f}"
+
+
+async def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
     rest = request.app.state.rest
     sym = symbol.upper()
 
     position: dict[str, Any] = {
         "symbol": sym, "positionAmt": "0", "entryPrice": "0",
-        "markPrice": "0", "unRealizedProfit": "0", "leverage": str(LEVERAGE_DEFAULT),
+        "markPrice": "0", "unRealizedProfit": "0", "netUnrealizedProfit": None,
+        "leverage": str(LEVERAGE_DEFAULT),
     }
     try:
         for p in rest.get_position_risk(sym) or []:
@@ -45,12 +66,17 @@ def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
                 # this branch (and its real leverage figure) is only hit while
                 # a position is actually open — the dict default above covers
                 # the flat case with the configured leverage instead of "0".
+                gross_pnl = float(p.get("unRealizedProfit", "0") or 0)
+                mark_price = float(p.get("markPrice", "0") or 0)
+                position_amt = float(p.get("positionAmt", "0") or 0)
                 position = {
                     "symbol": sym,
                     "positionAmt": p.get("positionAmt", "0"),
                     "entryPrice": p.get("entryPrice", "0"),
                     "markPrice": p.get("markPrice", "0"),
                     "unRealizedProfit": p.get("unRealizedProfit", "0"),
+                    "netUnrealizedProfit": await _net_unrealized_pnl(
+                        request, sym, gross_pnl, mark_price, position_amt),
                     "leverage": p.get("leverage") or str(LEVERAGE_DEFAULT),
                 }
                 break
@@ -73,10 +99,10 @@ def dashboard_html():
 
 
 @router.get("/orders/open")
-def orders_open(request: Request, symbol: Optional[str] = None):
+async def orders_open(request: Request, symbol: Optional[str] = None):
     engine = request.app.state.engine
     sym = (symbol or engine.symbol).upper()
-    return _position_snapshot(request, sym)
+    return await _position_snapshot(request, sym)
 
 
 @router.get("/intents")
@@ -101,7 +127,7 @@ async def _dashboard_sse_gen(request: Request, symbol: str, interval_ms: int):
             break
         try:
             payload = {
-                "position": _position_snapshot(request, symbol),
+                "position": await _position_snapshot(request, symbol),
                 "intents": [_intent_to_dict(i) for i in await engine.intents.list_recent(10)],
                 "events": await engine.events.tail(15),
             }
