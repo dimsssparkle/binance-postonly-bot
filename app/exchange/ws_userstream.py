@@ -163,10 +163,14 @@ class UserDataStream:
         if not client_order_id:
             return
 
-        # "n"/"N" (commission/commissionAsset) только осмысленны на реальном
-        # исполнении трейда ("x":"TRADE") — на NEW/CANCELED там обычно "0".
-        commission_delta = o.get("n") if exec_type == "TRADE" else None
-        commission_asset = o.get("N") if exec_type == "TRADE" else None
+        # "n"/"N"/"rp" (commission/commissionAsset/realizedPnl) только
+        # осмысленны на реальном исполнении трейда ("x":"TRADE") — на
+        # NEW/CANCELED там обычно "0". "ap" — средняя цена исполнения ордера.
+        is_trade = exec_type == "TRADE"
+        commission_delta = o.get("n") if is_trade else None
+        commission_asset = o.get("N") if is_trade else None
+        realized_pnl_delta = o.get("rp") if is_trade else None
+        filled_price = o.get("ap") if is_trade and float(o.get("ap", 0) or 0) > 0 else None
 
         mapped = _STATUS_MAP.get(status)
         intent_order = await self.orders.get_by_client_order_id(client_order_id)
@@ -174,7 +178,9 @@ class UserDataStream:
             await self.orders.update_status(client_order_id, mapped, filled_qty=filled_qty,
                                              exchange_order_id=exchange_order_id,
                                              commission_delta=commission_delta,
-                                             commission_asset=commission_asset)
+                                             commission_asset=commission_asset,
+                                             filled_price=filled_price,
+                                             realized_pnl_delta=realized_pnl_delta)
 
         if status in _TERMINAL_STATUSES:
             self._results[client_order_id] = {

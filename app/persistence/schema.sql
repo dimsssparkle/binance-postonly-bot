@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS intent_orders (
     filled_qty          TEXT NOT NULL DEFAULT '0',
     commission          TEXT NOT NULL DEFAULT '0',
     commission_asset    TEXT,
+    filled_price        TEXT,
+    realized_pnl        TEXT NOT NULL DEFAULT '0',
     created_at_ms       INTEGER NOT NULL,
     updated_at_ms       INTEGER NOT NULL
 );

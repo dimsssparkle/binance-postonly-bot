@@ -12,6 +12,8 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _COLUMN_MIGRATIONS = [
     ("intent_orders", "commission", "TEXT NOT NULL DEFAULT '0'"),
     ("intent_orders", "commission_asset", "TEXT"),
+    ("intent_orders", "filled_price", "TEXT"),
+    ("intent_orders", "realized_pnl", "TEXT NOT NULL DEFAULT '0'"),
 ]
 
 

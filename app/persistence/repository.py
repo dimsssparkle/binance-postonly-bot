@@ -43,6 +43,8 @@ def _row_to_intent_order(row: aiosqlite.Row) -> IntentOrder:
         filled_qty=row["filled_qty"],
         commission=row["commission"] if "commission" in row.keys() else "0",
         commission_asset=row["commission_asset"] if "commission_asset" in row.keys() else None,
+        filled_price=row["filled_price"] if "filled_price" in row.keys() else None,
+        realized_pnl=row["realized_pnl"] if "realized_pnl" in row.keys() else "0",
         created_at_ms=row["created_at_ms"],
         updated_at_ms=row["updated_at_ms"],
     )
@@ -72,6 +74,18 @@ class IntentRepository:
             "SELECT * FROM intents WHERE symbol = ? AND state NOT IN ('flat', 'failed') "
             "ORDER BY id DESC LIMIT 1",
             (symbol.upper(),),
+        )
+        row = await cur.fetchone()
+        return _row_to_intent(row) if row else None
+
+    async def get_previous_for_symbol(self, symbol: str, before_id: int) -> Optional[Intent]:
+        """Intent, непосредственно предшествовавший этому по тому же символу —
+        нужен, когда позиция закрылась НОВЫМ intent-ом (close_opposite), а не
+        TP/SL внутри того же intent-а, что её открыл: комиссия входа осталась
+        там, у предыдущего."""
+        cur = await self._conn.execute(
+            "SELECT * FROM intents WHERE symbol = ? AND id < ? ORDER BY id DESC LIMIT 1",
+            (symbol.upper(), before_id),
         )
         row = await cur.fetchone()
         return _row_to_intent(row) if row else None
@@ -151,7 +165,9 @@ class IntentOrderRepository:
                              filled_qty: Optional[str] = None,
                              exchange_order_id: Optional[int] = None,
                              commission_delta: Optional[str] = None,
-                             commission_asset: Optional[str] = None) -> None:
+                             commission_asset: Optional[str] = None,
+                             filled_price: Optional[str] = None,
+                             realized_pnl_delta: Optional[str] = None) -> None:
         sets = ["status = ?", "updated_at_ms = ?"]
         params: list[Any] = [status.value, _now_ms()]
         if filled_qty is not None:
@@ -160,17 +176,25 @@ class IntentOrderRepository:
         if exchange_order_id is not None:
             sets.append("exchange_order_id = ?")
             params.append(exchange_order_id)
-        if commission_delta is not None:
-            # WS шлёт комиссию ЗА КАЖДЫЙ трейд (не кумулятивно), поэтому
-            # накапливаем, а не перезаписываем — важно для частичных исполнений.
+        if commission_delta is not None or realized_pnl_delta is not None:
+            # WS шлёт комиссию/realizedPnl ЗА КАЖДЫЙ трейд (не кумулятивно),
+            # поэтому накапливаем, а не перезаписываем — важно для частичных
+            # исполнений.
             current = await self.get_by_client_order_id(client_order_id)
-            prev = Decimal(current.commission or "0") if current else Decimal("0")
-            new_total = prev + Decimal(str(commission_delta))
-            sets.append("commission = ?")
-            params.append(str(new_total))
+            if commission_delta is not None:
+                prev = Decimal(current.commission or "0") if current else Decimal("0")
+                sets.append("commission = ?")
+                params.append(str(prev + Decimal(str(commission_delta))))
+            if realized_pnl_delta is not None:
+                prev_rp = Decimal(current.realized_pnl or "0") if current else Decimal("0")
+                sets.append("realized_pnl = ?")
+                params.append(str(prev_rp + Decimal(str(realized_pnl_delta))))
         if commission_asset is not None:
             sets.append("commission_asset = ?")
             params.append(commission_asset)
+        if filled_price is not None:
+            sets.append("filled_price = ?")
+            params.append(filled_price)
         params.append(client_order_id)
         await self._conn.execute(
             f"UPDATE intent_orders SET {', '.join(sets)} WHERE client_order_id = ?", params
@@ -186,6 +210,24 @@ class IntentOrderRepository:
             if r.role in (OrderRole.ENTRY_MAKER, OrderRole.ENTRY_MARKET):
                 total += Decimal(r.commission or "0")
         return total
+
+    async def sum_all_commission(self, intent_id: int) -> Decimal:
+        """Сумма комиссий по ВСЕМ ордерам intent-а (вход + выход)."""
+        rows = await self.list_for_intent(intent_id)
+        return sum((Decimal(r.commission or "0") for r in rows), Decimal("0"))
+
+    async def get_closing_fill(self, intent_id: int) -> Optional[IntentOrder]:
+        """Ордер, который фактически закрыл позицию (TP/SL сработал на бирже,
+        либо ручное/встречное закрытие) — последний FILLED с такой ролью."""
+        rows = await self.list_for_intent(intent_id)
+        closing = [
+            r for r in rows
+            if r.role in (OrderRole.TP, OrderRole.SL, OrderRole.CLOSE_OPPOSITE)
+            and r.status == OrderStatus.FILLED
+        ]
+        if not closing:
+            return None
+        return max(closing, key=lambda r: r.id or 0)
 
 
 class EventLogRepository:

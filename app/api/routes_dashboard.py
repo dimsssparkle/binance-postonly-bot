@@ -3,19 +3,29 @@ import asyncio
 import json
 import logging
 import time
+from decimal import Decimal
 from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.config import LEVERAGE_DEFAULT
+from app.engine.analytics import daily_net_pnl, round_trip_commission
 from app.engine.models import Intent
 
 log = logging.getLogger("api.dashboard")
 router = APIRouter()
 
 
-def _intent_to_dict(intent: Intent) -> dict:
+async def _intent_to_dict(request: Request, intent: Intent) -> dict:
+    engine = request.app.state.engine
+    closing = await engine.orders.get_closing_fill(intent.id)
+    if closing is not None:
+        total_commission = await round_trip_commission(engine.intents, engine.orders, intent, closing)
+        net_realized_pnl = Decimal(closing.realized_pnl or "0") - total_commission
+    else:
+        total_commission = await engine.orders.sum_all_commission(intent.id)
+        net_realized_pnl = None
     return {
         "id": intent.id,
         "symbol": intent.symbol,
@@ -24,6 +34,9 @@ def _intent_to_dict(intent: Intent) -> dict:
         "state": intent.state.value,
         "attempt_no": intent.attempt_no,
         "entry_price": intent.entry_price,
+        "close_price": closing.filled_price if closing else None,
+        "net_realized_pnl": str(net_realized_pnl) if net_realized_pnl is not None else None,
+        "total_commission": str(total_commission),
         "failure_reason": intent.failure_reason,
         "created_at_ms": intent.created_at_ms,
         "updated_at_ms": intent.updated_at_ms,
@@ -109,7 +122,15 @@ async def orders_open(request: Request, symbol: Optional[str] = None):
 async def list_intents(request: Request, limit: int = 30):
     engine = request.app.state.engine
     rows = await engine.intents.list_recent(limit)
-    return {"intents": [_intent_to_dict(i) for i in rows]}
+    return {"intents": [await _intent_to_dict(request, i) for i in rows]}
+
+
+@router.get("/pnl/daily")
+async def pnl_daily(request: Request, symbol: Optional[str] = None):
+    engine = request.app.state.engine
+    sym = (symbol or engine.symbol).upper()
+    total = await daily_net_pnl(engine.intents, engine.orders, sym)
+    return {"symbol": sym, "net_pnl_today": str(total)}
 
 
 @router.get("/events")
@@ -126,10 +147,12 @@ async def _dashboard_sse_gen(request: Request, symbol: str, interval_ms: int):
         if await request.is_disconnected():
             break
         try:
+            intents_rows = await engine.intents.list_recent(10)
             payload = {
                 "position": await _position_snapshot(request, symbol),
-                "intents": [_intent_to_dict(i) for i in await engine.intents.list_recent(10)],
+                "intents": [await _intent_to_dict(request, i) for i in intents_rows],
                 "events": await engine.events.tail(15),
+                "netPnlToday": str(await daily_net_pnl(engine.intents, engine.orders, symbol)),
             }
             yield f"data: {json.dumps(payload)}\n\n"
         except Exception as e:

@@ -116,7 +116,10 @@
 <div class="wrap">
   <header>
     <h1>Binance Bot v2 <span class="pill" id="symPill">—</span> <span class="pill" id="levPill">x—</span></h1>
-    <span class="conn" id="connStatus"><span class="dot"></span><span id="connLabel">connecting…</span></span>
+    <div style="display:flex;align-items:center;gap:12px">
+      <span class="pill" id="dailyPnlPill">День: —</span>
+      <span class="conn" id="connStatus"><span class="dot"></span><span id="connLabel">connecting…</span></span>
+    </div>
   </header>
 
   <div class="grid">
@@ -157,6 +160,10 @@
         <div class="qty-row">SL %: <input type="number" id="slInput" step="0.01" placeholder="—"/></div>
         <div class="row"><button id="btnSaveTpSl">Сохранить</button></div>
         <div class="action-msg" id="tpslMsg"></div>
+        <dl class="kv" id="tpslPreview" style="margin-top:6px">
+          <dt>Если LONG сейчас</dt><dd id="previewLong">—</dd>
+          <dt>Если SHORT сейчас</dt><dd id="previewShort">—</dd>
+        </dl>
       </div>
     </div>
   </div>
@@ -166,9 +173,10 @@
     <div class="table-scroll">
       <table id="intentsTable">
         <thead><tr>
-          <th>ID</th><th>Сторона</th><th>Qty</th><th>Состояние</th><th>Вход</th><th>Попыток</th><th>Обновлён</th>
+          <th>ID</th><th>Сторона</th><th>Qty</th><th>Состояние</th><th>Вход</th><th>Закрытие</th>
+          <th>Net PnL</th><th>Комиссия</th><th>Попыток</th><th>Обновлён</th>
         </tr></thead>
-        <tbody><tr><td colspan="7" class="empty">загрузка…</td></tr></tbody>
+        <tbody><tr><td colspan="10" class="empty">загрузка…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -215,11 +223,13 @@ function renderPosition(p) {
   }
   const book = p.book || {};
   document.getElementById('posBook').textContent = (book.bidPrice || "—") + " / " + (book.askPrice || "—");
+  lastBook = book;
+  updateTpSlPreview();
 }
 
 function renderIntents(intents) {
   const tbody = document.querySelector('#intentsTable tbody');
-  if (!intents || !intents.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">пока нет intent-ов</td></tr>'; return; }
+  if (!intents || !intents.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty">пока нет intent-ов</td></tr>'; return; }
   tbody.innerHTML = intents.map(i => `
     <tr>
       <td>#${i.id}</td>
@@ -227,6 +237,9 @@ function renderIntents(intents) {
       <td>${fmtNum(i.qty, 4)}</td>
       <td><span class="state-pill state-${i.state}">${i.state}</span></td>
       <td>${fmtNum(i.entry_price, 2)}</td>
+      <td>${fmtNum(i.close_price, 2)}</td>
+      <td class="${i.net_realized_pnl != null ? pnlClass(i.net_realized_pnl) : ''}">${fmtNum(i.net_realized_pnl, 4)}</td>
+      <td>${fmtNum(i.total_commission, 5)}</td>
       <td>${i.attempt_no}</td>
       <td>${fmtTs(i.updated_at_ms)}</td>
     </tr>
@@ -251,11 +264,16 @@ async function postAction(url, body, btns) {
   msgEl.textContent = "отправка…";
   try {
     const r = await fetch(url, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {}) });
-    const j = await r.json();
+    const text = await r.text();
+    let j = {};
+    try { j = text ? JSON.parse(text) : {}; } catch (parseErr) {
+      msgEl.textContent = "Соединение прервано, ответ не дошёл — проверьте состояние позиции и повторите.";
+      return;
+    }
     if (!r.ok) { msgEl.textContent = "Ошибка: " + (j.detail || r.status); }
     else { msgEl.textContent = "OK: intent #" + (j.intent && j.intent.id) + " → " + (j.intent && j.intent.state); }
   } catch (e) {
-    msgEl.textContent = "Ошибка сети: " + e;
+    msgEl.textContent = "Ошибка сети (соединение прервано): " + e;
   } finally {
     btns.forEach(b => b.disabled = false);
   }
@@ -284,12 +302,47 @@ const slInput = document.getElementById('slInput');
 const tpslMsg = document.getElementById('tpslMsg');
 const btnSaveTpSl = document.getElementById('btnSaveTpSl');
 
+let lastRates = { maker: 0, taker: 0 };
+let lastBook = null;
+
+// Цена входа не влияет на итоговую цену TP/SL после сокращения (target и
+// комиссия входа масштабируются вместе с qty*entry_price), поэтому превью
+// не нуждается в объёме позиции — только текущая цена + ставки комиссий.
+function estimateExitPrice(entryPrice, pct, isLoss, side, makerRate, takerRate) {
+  const signedTarget = isLoss ? -pct : pct;
+  if (side === 'LONG') {
+    return entryPrice * (1 + signedTarget + makerRate) / (1 - takerRate);
+  }
+  return entryPrice * (1 - makerRate - signedTarget) / (1 + takerRate);
+}
+
+function updateTpSlPreview() {
+  const previewLongEl = document.getElementById('previewLong');
+  const previewShortEl = document.getElementById('previewShort');
+  if (!lastBook || !lastBook.bidPrice || !lastBook.askPrice) {
+    previewLongEl.textContent = '—'; previewShortEl.textContent = '—';
+    return;
+  }
+  const tpPct = Number(tpInput.value) / 100;
+  const slPct = Number(slInput.value) / 100;
+  const mid = (Number(lastBook.bidPrice) + Number(lastBook.askPrice)) / 2;
+  if (!tpPct && !slPct) { previewLongEl.textContent = '—'; previewShortEl.textContent = '—'; return; }
+  const longTp = tpPct ? estimateExitPrice(mid, tpPct, false, 'LONG', lastRates.maker, lastRates.taker) : null;
+  const longSl = slPct ? estimateExitPrice(mid, slPct, true, 'LONG', lastRates.maker, lastRates.taker) : null;
+  const shortTp = tpPct ? estimateExitPrice(mid, tpPct, false, 'SHORT', lastRates.maker, lastRates.taker) : null;
+  const shortSl = slPct ? estimateExitPrice(mid, slPct, true, 'SHORT', lastRates.maker, lastRates.taker) : null;
+  previewLongEl.textContent = `TP ${fmtNum(longTp, 2)} / SL ${fmtNum(longSl, 2)}`;
+  previewShortEl.textContent = `TP ${fmtNum(shortTp, 2)} / SL ${fmtNum(shortSl, 2)}`;
+}
+
 async function loadTpSl() {
   try {
     const r = await fetch('/settings/tpsl');
     const j = await r.json();
     tpInput.value = (Number(j.tp_pct) * 100).toString();
     slInput.value = (Number(j.sl_pct) * 100).toString();
+    lastRates = { maker: Number(j.maker_rate || 0), taker: Number(j.taker_rate || 0) };
+    updateTpSlPreview();
   } catch (e) { tpslMsg.textContent = 'Не удалось загрузить настройки'; }
 }
 
@@ -308,6 +361,8 @@ btnSaveTpSl.onclick = async () => {
     btnSaveTpSl.disabled = false;
   }
 };
+tpInput.addEventListener('input', updateTpSlPreview);
+slInput.addEventListener('input', updateTpSlPreview);
 loadTpSl();
 
 let es;
@@ -321,6 +376,10 @@ function connect() {
       renderPosition(data.position);
       renderIntents(data.intents);
       renderEvents(data.events);
+      if (data.netPnlToday !== undefined) {
+        const pill = document.getElementById('dailyPnlPill');
+        pill.textContent = 'День: ' + fmtNum(data.netPnlToday, 4);
+      }
     } catch (e) { console.warn('bad SSE payload', e); }
   };
 }

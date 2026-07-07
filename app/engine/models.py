@@ -80,6 +80,8 @@ class IntentOrder:
     filled_qty: str = "0"
     commission: str = "0"
     commission_asset: Optional[str] = None
+    filled_price: Optional[str] = None
+    realized_pnl: str = "0"
     created_at_ms: int = 0
     updated_at_ms: int = 0
 

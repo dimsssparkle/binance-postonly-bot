@@ -65,7 +65,15 @@ async def close_trade(request: Request):
 @router.get("/settings/tpsl")
 def get_tpsl_settings(request: Request):
     engine = _get_engine(request)
-    return {"tp_pct": engine.tp_pct, "sl_pct": engine.sl_pct}
+    try:
+        rates = engine.commission_rates.get(engine.symbol)
+    except Exception as e:
+        log.warning(f"[settings] commission rate fetch failed: {e}")
+        rates = {"maker": 0.0, "taker": 0.0}
+    return {
+        "tp_pct": engine.tp_pct, "sl_pct": engine.sl_pct,
+        "maker_rate": rates["maker"], "taker_rate": rates["taker"],
+    }
 
 
 @router.post("/settings/tpsl")
