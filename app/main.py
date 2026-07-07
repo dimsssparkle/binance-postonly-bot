@@ -23,6 +23,8 @@ from app.persistence.db import close_db, open_db
 from app.persistence.repository import (
     EventLogRepository, IntentOrderRepository, IntentRepository, ListenKeyRepository,
 )
+from app.strategy.noop import NoopStrategy
+from app.strategy.runner import StrategyRunner
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -86,10 +88,16 @@ async def lifespan(app: FastAPI):
     reconciler = Reconciler(engine)
     await reconciler.run()
 
+    strategy = NoopStrategy()
+    strategy_runner = StrategyRunner(strategy, engine)
+    await strategy_runner.start()
+    app.state.strategy_runner = strategy_runner
+
     log.info(f"Startup OK: engine ready for {SYMBOL_DEFAULT}")
     try:
         yield
     finally:
+        await strategy_runner.stop()
         await user_stream.stop()
         await close_db(conn)
 
