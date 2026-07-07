@@ -1,56 +1,8 @@
 services:
-  # Новый сервис в Frankfurt — Binance Futures блокирует US-регион (451),
-  # поэтому старый сервис (Oregon, ниже) для торговли больше не используется.
-  # Dedicated IP набор во Frankfurt нужно вручную привязать к этому сервису в дашборде.
-  - type: web
-    name: binance-postonly-bot-fra
-    runtime: python
-    region: frankfurt
-    autoDeploy: true
-    numInstances: 1
-    healthCheckPath: /healthz
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: BINANCE_API_KEY
-        sync: false
-      - key: BINANCE_API_SECRET
-        sync: false
-      - key: BINANCE_BASE_URL
-        value: https://fapi.binance.com
-      - key: SYMBOL_DEFAULT
-        value: ETHUSDT
-      - key: QTY_DEFAULT
-        value: "0.01"
-      - key: LEVERAGE_DEFAULT
-        value: "10"
-      - key: ORDER_TIMEOUT_MS
-        value: "750"
-      - key: CLOSE_TIMEOUT_MS
-        value: "2500"
-      - key: MAX_MAKER_ATTEMPTS
-        value: "3"
-      - key: MAX_CLOSE_RETRIES
-        value: "25"
-      - key: HEDGE_MODE
-        value: off
-      - key: LOG_LEVEL
-        value: INFO
-      - key: TP_PCT
-        value: "0.0023"
-      - key: SL_PCT
-        value: "0.0015"
-      - key: DB_PATH
-        value: bot.db
-
-  # СТАРЫЙ сервис (Oregon/US) — не может торговать на Binance Futures (451).
-  # Оставлен только чтобы Render Blueprint sync не удалил его сам собой;
-  # удалите вручную в дашборде Render, когда убедитесь, что binance-postonly-bot-fra работает.
   - type: web
     name: binance-postonly-bot
     runtime: python
+    region: frankfurt
     autoDeploy: true
     numInstances: 1
     healthCheckPath: /healthz
