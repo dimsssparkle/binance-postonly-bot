@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio
 import logging
-import time
 from typing import Optional
 
 from binance.error import ClientError
@@ -12,6 +11,7 @@ from app.engine.rounding import round_to_step, round_up_to_step
 from app.exchange.errors import POST_ONLY_WOULD_CROSS, is_code
 from app.exchange.filters import SymbolFilterCache
 from app.exchange.rest import BinanceRestClient
+from app.exchange.ws_userstream import UserDataStream
 from app.persistence.repository import EventLogRepository, IntentOrderRepository, IntentRepository
 
 log = logging.getLogger("engine")
@@ -24,9 +24,9 @@ class ExecutionEngine:
     Управляет Intent-ами (задачами "довести позицию по символу до нужного состояния")
     через явную последовательность персистентных переходов состояния.
 
-    В этой (Milestone 2) версии ожидание исполнения ордеров реализовано через REST-поллинг
-    (временная замена WebSocket User Data Stream, который заменит его в Milestone 3) —
-    но сама структура state machine и персистентность уже финальные.
+    Ожидание исполнения ордеров событийное — через UserDataStream (WebSocket).
+    REST используется только как разовый safety-net запрос при таймауте
+    (на случай пропущенного события при разрыве соединения), не как поллинг-цикл.
     """
 
     def __init__(
@@ -36,6 +36,7 @@ class ExecutionEngine:
         intents: IntentRepository,
         orders: IntentOrderRepository,
         events: EventLogRepository,
+        user_stream: UserDataStream,
         symbol: str,
         qty_default: str,
         order_timeout_ms: int,
@@ -44,13 +45,13 @@ class ExecutionEngine:
         max_close_retries: int,
         tp_pct: float,
         sl_pct: float,
-        poll_interval_sec: float = 0.15,
     ) -> None:
         self.rest = rest
         self.filters = filters
         self.intents = intents
         self.orders = orders
         self.events = events
+        self.user_stream = user_stream
         self.symbol = symbol.upper()
         self.qty_default = qty_default
         self.order_timeout_ms = order_timeout_ms
@@ -59,7 +60,6 @@ class ExecutionEngine:
         self.max_close_retries = max_close_retries
         self.tp_pct = tp_pct
         self.sl_pct = sl_pct
-        self.poll_interval_sec = poll_interval_sec
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -356,7 +356,10 @@ class ExecutionEngine:
         return max(0.0, target_qty - current_same_dir)
 
     # ------------------------------------------------------------------ #
-    # Fill waiting (REST-poll interim — replaced by WS events in Milestone 3)
+    # Fill waiting — event-driven off the WebSocket user data stream.
+    # A single REST query is used only as a safety net if the WS event
+    # never arrives in time (e.g. a connection drop swallowed it), not as
+    # a polling loop.
     # ------------------------------------------------------------------ #
     async def _wait_for_fill(self, client_order_id: str, timeout_ms: int) -> bool:
         order = await self.orders.get_by_client_order_id(client_order_id)
@@ -365,8 +368,13 @@ class ExecutionEngine:
         intent = await self.intents.get(order.intent_id)
         symbol = intent.symbol
 
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
+        event = self.user_stream.waiter_for(client_order_id)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout_ms / 1000)
+            result = self.user_stream.result_for(client_order_id)
+            return bool(result and result["status"] == "FILLED")
+        except asyncio.TimeoutError:
+            log.debug(f"[wait_for_fill] no WS event for {client_order_id} within {timeout_ms}ms, REST fallback check")
             try:
                 resp = self.rest.get_order(symbol, orig_client_order_id=client_order_id)
                 status = resp.get("status")
@@ -379,11 +387,8 @@ class ExecutionEngine:
                 if status in _TERMINAL_ORDER_STATUSES:
                     await self.orders.update_status(client_order_id, OrderStatus.CANCELED,
                                                       filled_qty=filled_qty, exchange_order_id=order_id)
-                    return False
-                if status == "PARTIALLY_FILLED":
-                    await self.orders.update_status(client_order_id, OrderStatus.PARTIALLY_FILLED,
-                                                      filled_qty=filled_qty, exchange_order_id=order_id)
             except ClientError as e:
-                log.debug(f"[wait_for_fill] query failed (will retry): {e}")
-            await asyncio.sleep(self.poll_interval_sec)
-        return False
+                log.warning(f"[wait_for_fill] REST fallback query failed: {e}")
+            return False
+        finally:
+            self.user_stream.clear_waiter(client_order_id)

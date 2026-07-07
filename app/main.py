@@ -14,8 +14,11 @@ from app.config import (
 from app.engine.state_machine import ExecutionEngine
 from app.exchange.filters import SymbolFilterCache
 from app.exchange.rest import BinanceRestClient
+from app.exchange.ws_userstream import UserDataStream
 from app.persistence.db import close_db, open_db
-from app.persistence.repository import EventLogRepository, IntentOrderRepository, IntentRepository
+from app.persistence.repository import (
+    EventLogRepository, IntentOrderRepository, IntentRepository, ListenKeyRepository,
+)
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -47,6 +50,12 @@ async def lifespan(app: FastAPI):
     intents = IntentRepository(conn)
     orders = IntentOrderRepository(conn)
     events = EventLogRepository(conn)
+    listen_keys = ListenKeyRepository(conn)
+
+    user_stream = UserDataStream(
+        rest=rest, listen_keys=listen_keys, orders=orders, intents=intents, events=events,
+    )
+    await user_stream.start()
 
     engine = ExecutionEngine(
         rest=rest,
@@ -54,6 +63,7 @@ async def lifespan(app: FastAPI):
         intents=intents,
         orders=orders,
         events=events,
+        user_stream=user_stream,
         symbol=SYMBOL_DEFAULT,
         qty_default=str(QTY_DEFAULT),
         order_timeout_ms=ORDER_TIMEOUT_MS,
@@ -67,11 +77,13 @@ async def lifespan(app: FastAPI):
     app.state.db = conn
     app.state.rest = rest
     app.state.engine = engine
+    app.state.user_stream = user_stream
 
     log.info(f"Startup OK: engine ready for {SYMBOL_DEFAULT}")
     try:
         yield
     finally:
+        await user_stream.stop()
         await close_db(conn)
 
 
