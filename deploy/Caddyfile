@@ -1,0 +1,6 @@
+65-109-175-194.sslip.io {
+	basicauth {
+		admin $2a$14$78HJSrC/4B/riy78zGD8B.nPJ8BFYdANXfonmcXHCR237JFMmnHD6
+	}
+	reverse_proxy 127.0.0.1:8000
+}
