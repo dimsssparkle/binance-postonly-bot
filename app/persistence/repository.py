@@ -97,12 +97,18 @@ class IntentRepository:
         await self._conn.execute(f"UPDATE intents SET {', '.join(sets)} WHERE id = ?", params)
         await self._conn.commit()
 
-    async def increment_attempt(self, intent_id: int) -> None:
+    async def increment_attempt(self, intent_id: int) -> int:
+        """Возвращает НОВОЕ значение attempt_no — используется как монотонный
+        нонс для clientOrderId, чтобы повторный запуск intent-а после краха
+        не пытался переиспользовать уже занятый client_order_id."""
         await self._conn.execute(
             "UPDATE intents SET attempt_no = attempt_no + 1, updated_at_ms = ? WHERE id = ?",
             (_now_ms(), intent_id),
         )
         await self._conn.commit()
+        cur = await self._conn.execute("SELECT attempt_no FROM intents WHERE id = ?", (intent_id,))
+        row = await cur.fetchone()
+        return row["attempt_no"]
 
 
 class IntentOrderRepository:

@@ -158,9 +158,10 @@ class ExecutionEngine:
                 return
 
             attempts += 1
+            seq = await self.intents.increment_attempt(intent.id)
             qty_str = round_to_step(rem, step)
             price = self._maker_price(symbol, close_side)
-            cid = f"i{intent.id}-close-{attempts}"
+            cid = f"i{intent.id}-close-{seq}"
             await self.orders.create(intent.id, OrderRole.CLOSE_OPPOSITE, cid, close_side,
                                       "LIMIT", qty_str, price)
 
@@ -218,9 +219,9 @@ class ExecutionEngine:
         await self.events.append("engine", "state_transition", {"to": "entry_maker_pending"}, intent.id)
 
         for attempt in range(1, self.max_maker_attempts + 1):
-            await self.intents.increment_attempt(intent.id)
+            seq = await self.intents.increment_attempt(intent.id)
             price = self._maker_price(symbol, entry_side)
-            cid = f"i{intent.id}-entry-{attempt}"
+            cid = f"i{intent.id}-entry-{seq}"
             await self.orders.create(intent.id, OrderRole.ENTRY_MAKER, cid, entry_side,
                                       "LIMIT", qty_str, price)
             try:
@@ -253,7 +254,8 @@ class ExecutionEngine:
 
         rem_str = round_to_step(remaining, step)
         rem_str = self._ensure_min_notional(symbol, entry_side, rem_str)
-        cid = f"i{intent.id}-entry-market"
+        seq = await self.intents.increment_attempt(intent.id)
+        cid = f"i{intent.id}-entry-market-{seq}"
         await self.orders.create(intent.id, OrderRole.ENTRY_MARKET, cid, entry_side, "MARKET", rem_str, None)
         self.rest.place_market(symbol, entry_side, rem_str, reduce_only=False, new_client_order_id=cid)
         await self._wait_for_fill(cid, timeout_ms=self.order_timeout_ms * 5)
@@ -279,7 +281,8 @@ class ExecutionEngine:
         if self.tp_pct > 0:
             tp_price = entry_price * (1 + self.tp_pct) if side == Side.LONG else entry_price * (1 - self.tp_pct)
             tp_price_str = round_to_step(tp_price, tick)
-            cid = f"i{intent.id}-tp"
+            seq = await self.intents.increment_attempt(intent.id)
+            cid = f"i{intent.id}-tp-{seq}"
             await self.orders.create(intent.id, OrderRole.TP, cid, close_side, "TAKE_PROFIT_MARKET",
                                       None, tp_price_str)
             try:
@@ -292,7 +295,8 @@ class ExecutionEngine:
         if self.sl_pct > 0:
             sl_price = entry_price * (1 - self.sl_pct) if side == Side.LONG else entry_price * (1 + self.sl_pct)
             sl_price_str = round_to_step(sl_price, tick)
-            cid = f"i{intent.id}-sl"
+            seq = await self.intents.increment_attempt(intent.id)
+            cid = f"i{intent.id}-sl-{seq}"
             await self.orders.create(intent.id, OrderRole.SL, cid, close_side, "STOP_MARKET",
                                       None, sl_price_str)
             try:

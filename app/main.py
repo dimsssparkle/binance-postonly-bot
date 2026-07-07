@@ -11,6 +11,7 @@ from app.config import (
     MAX_CLOSE_RETRIES, MAX_MAKER_ATTEMPTS, ORDER_TIMEOUT_MS, PORT, QTY_DEFAULT,
     SL_PCT, SYMBOL_DEFAULT, TP_PCT,
 )
+from app.engine.reconcile import Reconciler
 from app.engine.state_machine import ExecutionEngine
 from app.exchange.filters import SymbolFilterCache
 from app.exchange.rest import BinanceRestClient
@@ -78,6 +79,9 @@ async def lifespan(app: FastAPI):
     app.state.rest = rest
     app.state.engine = engine
     app.state.user_stream = user_stream
+
+    reconciler = Reconciler(engine)
+    await reconciler.run()
 
     log.info(f"Startup OK: engine ready for {SYMBOL_DEFAULT}")
     try:
