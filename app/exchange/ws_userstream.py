@@ -157,16 +157,24 @@ class UserDataStream:
         o = msg.get("o", {})
         client_order_id = o.get("c")
         status = o.get("X")
+        exec_type = o.get("x")
         exchange_order_id = o.get("i")
         filled_qty = o.get("z", "0")
         if not client_order_id:
             return
 
+        # "n"/"N" (commission/commissionAsset) только осмысленны на реальном
+        # исполнении трейда ("x":"TRADE") — на NEW/CANCELED там обычно "0".
+        commission_delta = o.get("n") if exec_type == "TRADE" else None
+        commission_asset = o.get("N") if exec_type == "TRADE" else None
+
         mapped = _STATUS_MAP.get(status)
         intent_order = await self.orders.get_by_client_order_id(client_order_id)
         if intent_order is not None and mapped is not None:
             await self.orders.update_status(client_order_id, mapped, filled_qty=filled_qty,
-                                             exchange_order_id=exchange_order_id)
+                                             exchange_order_id=exchange_order_id,
+                                             commission_delta=commission_delta,
+                                             commission_asset=commission_asset)
 
         if status in _TERMINAL_STATUSES:
             self._results[client_order_id] = {

@@ -102,6 +102,10 @@ class BinanceRestClient:
     def book_ticker(self, symbol: str) -> Dict[str, Any]:
         return self.client.book_ticker(symbol=symbol)
 
+    def get_commission_rate(self, symbol: str) -> Dict[str, Any]:
+        """maker/takerCommissionRate для символа (аккаунт-специфичные, зависят от VIP-тира)."""
+        return self.client.sign_request("GET", "/fapi/v1/commissionRate", {"symbol": symbol})
+
     # --- Positions / account ---
     def get_position_risk(self, symbol: str | None = None):
         data = self.client.get_position_risk()

@@ -78,6 +78,8 @@ class IntentOrder:
     requested_price: Optional[str] = None
     status: OrderStatus = OrderStatus.PENDING
     filled_qty: str = "0"
+    commission: str = "0"
+    commission_asset: Optional[str] = None
     created_at_ms: int = 0
     updated_at_ms: int = 0
 

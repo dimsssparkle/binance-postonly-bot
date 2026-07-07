@@ -16,6 +16,7 @@ from app.config import (
 )
 from app.engine.reconcile import Reconciler
 from app.engine.state_machine import ExecutionEngine
+from app.exchange.fees import CommissionRateCache
 from app.exchange.filters import SymbolFilterCache
 from app.exchange.rest import BinanceRestClient
 from app.exchange.ws_userstream import UserDataStream
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
     conn = await open_db(DB_PATH)
     rest = BinanceRestClient()
     filters = SymbolFilterCache(rest)
+    commission_rates = CommissionRateCache(rest)
 
     _ensure_symbol_setup(rest, SYMBOL_DEFAULT)
 
@@ -78,6 +80,7 @@ async def lifespan(app: FastAPI):
         max_close_retries=MAX_CLOSE_RETRIES,
         tp_pct=TP_PCT,
         sl_pct=SL_PCT,
+        commission_rates=commission_rates,
     )
 
     app.state.db = conn

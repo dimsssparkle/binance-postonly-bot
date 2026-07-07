@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS intent_orders (
     requested_price     TEXT,
     status              TEXT NOT NULL DEFAULT 'pending',
     filled_qty          TEXT NOT NULL DEFAULT '0',
+    commission          TEXT NOT NULL DEFAULT '0',
+    commission_asset    TEXT,
     created_at_ms       INTEGER NOT NULL,
     updated_at_ms       INTEGER NOT NULL
 );

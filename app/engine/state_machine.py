@@ -6,9 +6,11 @@ from typing import Optional
 from binance.error import ClientError
 
 from app.engine.exceptions import EngineBusyError, EngineFailure
+from app.engine.fees import solve_exit_price_for_net_pnl
 from app.engine.models import Intent, IntentState, OrderRole, OrderStatus, Side
 from app.engine.rounding import round_to_step, round_up_to_step
 from app.exchange.errors import POST_ONLY_WOULD_CROSS, is_code
+from app.exchange.fees import CommissionRateCache
 from app.exchange.filters import SymbolFilterCache
 from app.exchange.rest import BinanceRestClient
 from app.exchange.ws_userstream import UserDataStream
@@ -45,6 +47,7 @@ class ExecutionEngine:
         max_close_retries: int,
         tp_pct: float,
         sl_pct: float,
+        commission_rates: Optional[CommissionRateCache] = None,
     ) -> None:
         self.rest = rest
         self.filters = filters
@@ -60,6 +63,7 @@ class ExecutionEngine:
         self.max_close_retries = max_close_retries
         self.tp_pct = tp_pct
         self.sl_pct = sl_pct
+        self.commission_rates = commission_rates or CommissionRateCache(rest)
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -278,8 +282,23 @@ class ExecutionEngine:
         tick = self.filters.get(symbol)["tickSize"]
         close_side = "SELL" if side == Side.LONG else "BUY"
 
+        # Net-PnL-aware TP/SL: TP_PCT/SL_PCT задают ЧИСТЫЙ результат (после
+        # обеих комиссий), а не просто % движения цены от входа. Вход мог
+        # исполниться частично как maker, частично как market — берём
+        # фактическую суммарную комиссию входа из WS, а не оценку по ставке.
+        # Выход всегда taker (TP/SL — Algo Order, market-type).
+        qty_actual = abs(self._get_position_amt(symbol))
+        entry_fee = await self.orders.sum_entry_commission(intent.id)
+        try:
+            taker_rate = self.commission_rates.get(symbol)["taker"]
+        except Exception as e:
+            log.warning(f"[EXITS] commission rate fetch failed, assuming 0: {e}")
+            taker_rate = 0.0
+        entry_notional = entry_price * qty_actual
+
         if self.tp_pct > 0:
-            tp_price = entry_price * (1 + self.tp_pct) if side == Side.LONG else entry_price * (1 - self.tp_pct)
+            target_net = entry_notional * self.tp_pct
+            tp_price = solve_exit_price_for_net_pnl(entry_price, qty_actual, entry_fee, taker_rate, target_net, side)
             tp_price_str = round_to_step(tp_price, tick)
             seq = await self.intents.increment_attempt(intent.id)
             cid = f"i{intent.id}-tp-{seq}"
@@ -293,7 +312,8 @@ class ExecutionEngine:
                 await self.orders.update_status(cid, OrderStatus.REJECTED)
 
         if self.sl_pct > 0:
-            sl_price = entry_price * (1 - self.sl_pct) if side == Side.LONG else entry_price * (1 + self.sl_pct)
+            target_net = -(entry_notional * self.sl_pct)
+            sl_price = solve_exit_price_for_net_pnl(entry_price, qty_actual, entry_fee, taker_rate, target_net, side)
             sl_price_str = round_to_step(sl_price, tick)
             seq = await self.intents.increment_attempt(intent.id)
             cid = f"i{intent.id}-sl-{seq}"

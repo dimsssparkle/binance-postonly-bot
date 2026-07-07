@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import time
+from decimal import Decimal
 from typing import Any, Optional
 
 import aiosqlite
@@ -40,6 +41,8 @@ def _row_to_intent_order(row: aiosqlite.Row) -> IntentOrder:
         requested_price=row["requested_price"],
         status=OrderStatus(row["status"]),
         filled_qty=row["filled_qty"],
+        commission=row["commission"] if "commission" in row.keys() else "0",
+        commission_asset=row["commission_asset"] if "commission_asset" in row.keys() else None,
         created_at_ms=row["created_at_ms"],
         updated_at_ms=row["updated_at_ms"],
     )
@@ -146,7 +149,9 @@ class IntentOrderRepository:
 
     async def update_status(self, client_order_id: str, status: OrderStatus,
                              filled_qty: Optional[str] = None,
-                             exchange_order_id: Optional[int] = None) -> None:
+                             exchange_order_id: Optional[int] = None,
+                             commission_delta: Optional[str] = None,
+                             commission_asset: Optional[str] = None) -> None:
         sets = ["status = ?", "updated_at_ms = ?"]
         params: list[Any] = [status.value, _now_ms()]
         if filled_qty is not None:
@@ -155,11 +160,32 @@ class IntentOrderRepository:
         if exchange_order_id is not None:
             sets.append("exchange_order_id = ?")
             params.append(exchange_order_id)
+        if commission_delta is not None:
+            # WS шлёт комиссию ЗА КАЖДЫЙ трейд (не кумулятивно), поэтому
+            # накапливаем, а не перезаписываем — важно для частичных исполнений.
+            current = await self.get_by_client_order_id(client_order_id)
+            prev = Decimal(current.commission or "0") if current else Decimal("0")
+            new_total = prev + Decimal(str(commission_delta))
+            sets.append("commission = ?")
+            params.append(str(new_total))
+        if commission_asset is not None:
+            sets.append("commission_asset = ?")
+            params.append(commission_asset)
         params.append(client_order_id)
         await self._conn.execute(
             f"UPDATE intent_orders SET {', '.join(sets)} WHERE client_order_id = ?", params
         )
         await self._conn.commit()
+
+    async def sum_entry_commission(self, intent_id: int) -> Decimal:
+        """Сумма фактических комиссий по entry-ордерам (maker+market fallback)
+        этого intent-а — используется при расчёте net-TP/SL."""
+        rows = await self.list_for_intent(intent_id)
+        total = Decimal("0")
+        for r in rows:
+            if r.role in (OrderRole.ENTRY_MAKER, OrderRole.ENTRY_MARKET):
+                total += Decimal(r.commission or "0")
+        return total
 
 
 class EventLogRepository:
