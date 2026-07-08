@@ -273,7 +273,9 @@ class ExecutionEngine:
 
         symbol = intent.symbol
         side = intent.desired_side
-        entry_price = self._get_entry_price(symbol)
+        # Один REST-вызов вместо двух: entry_price и position_amt приходят в
+        # одном и том же ответе get_position_risk, момент времени один и тот же.
+        pos_amt, entry_price = self._get_position(symbol)
         await self.intents.update_state(intent.id, IntentState.PLACING_EXITS, entry_price=str(entry_price))
 
         if entry_price <= 0 or (self.tp_pct <= 0 and self.sl_pct <= 0):
@@ -287,7 +289,7 @@ class ExecutionEngine:
         # исполниться частично как maker, частично как market — берём
         # фактическую суммарную комиссию входа из WS, а не оценку по ставке.
         # Выход всегда taker (TP/SL — Algo Order, market-type).
-        qty_actual = abs(self._get_position_amt(symbol))
+        qty_actual = abs(pos_amt)
         entry_fee = await self.orders.sum_entry_commission(intent.id)
         try:
             taker_rate = self.commission_rates.get(symbol)["taker"]
@@ -329,17 +331,18 @@ class ExecutionEngine:
     # ------------------------------------------------------------------ #
     # Helpers: position/price/rounding
     # ------------------------------------------------------------------ #
-    def _get_position_amt(self, symbol: str) -> float:
+    def _get_position(self, symbol: str) -> tuple[float, float]:
+        """(positionAmt, entryPrice) одним REST-вызовом."""
         for p in self.rest.get_position_risk(symbol) or []:
             if str(p.get("symbol", "")).upper() == symbol.upper():
-                return float(p.get("positionAmt", 0) or 0)
-        return 0.0
+                return float(p.get("positionAmt", 0) or 0), float(p.get("entryPrice", 0) or 0)
+        return 0.0, 0.0
+
+    def _get_position_amt(self, symbol: str) -> float:
+        return self._get_position(symbol)[0]
 
     def _get_entry_price(self, symbol: str) -> float:
-        for p in self.rest.get_position_risk(symbol) or []:
-            if str(p.get("symbol", "")).upper() == symbol.upper():
-                return float(p.get("entryPrice", 0) or 0)
-        return 0.0
+        return self._get_position(symbol)[1]
 
     def _maker_price(self, symbol: str, side: str) -> str:
         bt = self.rest.book_ticker(symbol)

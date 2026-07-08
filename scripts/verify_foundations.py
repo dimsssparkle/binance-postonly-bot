@@ -14,7 +14,7 @@ from app.engine.rounding import round_to_step, round_up_to_step
 from app.engine.models import Side
 from app.persistence.db import open_db, close_db
 from app.persistence.repository import IntentRepository
-from app.config import SYMBOL_DEFAULT, DB_PATH
+from app.config import SYMBOL_DEFAULT
 
 
 async def main() -> None:

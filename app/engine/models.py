@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -22,17 +22,6 @@ class IntentState(str, Enum):
     FAILED = "failed"
 
 
-ACTIVE_STATES = {
-    IntentState.NEW,
-    IntentState.CANCELLING_EXITS,
-    IntentState.CLOSING_OPPOSITE,
-    IntentState.ENTRY_MAKER_PENDING,
-    IntentState.ENTRY_MARKET_PENDING,
-    IntentState.PLACING_EXITS,
-    IntentState.OPEN,
-}
-
-
 class OrderRole(str, Enum):
     CLOSE_OPPOSITE = "close_opposite"
     ENTRY_MAKER = "entry_maker"
@@ -48,7 +37,6 @@ class OrderStatus(str, Enum):
     FILLED = "filled"
     CANCELED = "canceled"
     REJECTED = "rejected"
-    EXPIRED = "expired"
 
 
 @dataclass
@@ -84,10 +72,3 @@ class IntentOrder:
     realized_pnl: str = "0"
     created_at_ms: int = 0
     updated_at_ms: int = 0
-
-
-@dataclass
-class Signal:
-    symbol: str
-    side: Side
-    source: str = "manual"

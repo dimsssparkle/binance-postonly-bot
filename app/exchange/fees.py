@@ -20,6 +20,3 @@ class CommissionRateCache:
                 "taker": float(resp.get("takerCommissionRate", 0.0)),
             }
         return self._rates[sym]
-
-    def refresh(self) -> None:
-        self._rates.clear()

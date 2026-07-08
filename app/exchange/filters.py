@@ -43,7 +43,3 @@ class SymbolFilterCache:
             info = self._ensure_exchange_info()
             self._filters[sym] = parse_symbol_filters(info, sym)
         return self._filters[sym]
-
-    def refresh(self) -> None:
-        self._exchange_info = None
-        self._filters.clear()

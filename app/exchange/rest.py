@@ -96,9 +96,6 @@ class BinanceRestClient:
     def get_order(self, symbol: str, order_id: int | None = None, orig_client_order_id: str | None = None):
         return self.client.query_order(symbol=symbol, orderId=order_id, origClientOrderId=orig_client_order_id)
 
-    def list_open_orders(self, symbol: str):
-        return self.client.get_orders(symbol=symbol.upper()) or []
-
     def book_ticker(self, symbol: str) -> Dict[str, Any]:
         return self.client.book_ticker(symbol=symbol)
 
@@ -113,12 +110,6 @@ class BinanceRestClient:
             sym = symbol.upper()
             data = [p for p in data if str(p.get("symbol", "")).upper() == sym]
         return data
-
-    def account_info(self) -> Dict[str, Any]:
-        return self.client.account()
-
-    def user_trades(self, symbol: str, startTime: int | None = None, endTime: int | None = None, limit: int = 1000):
-        return self.client.get_account_trades(symbol=symbol, startTime=startTime, endTime=endTime, limit=limit)
 
     # --- User Data Stream (listenKey) ---
     def new_listen_key(self) -> str:

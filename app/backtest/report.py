@@ -3,7 +3,6 @@
 убыточна по построению."""
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional
 
 from app.backtest.engine import BacktestResult
 

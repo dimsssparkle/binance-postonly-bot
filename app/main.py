@@ -92,7 +92,6 @@ async def lifespan(app: FastAPI):
         commission_rates=commission_rates,
     )
 
-    app.state.db = conn
     app.state.rest = rest
     app.state.engine = engine
     app.state.user_stream = user_stream
