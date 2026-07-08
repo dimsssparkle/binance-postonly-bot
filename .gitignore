@@ -11,6 +11,9 @@ __pycache__/
 *.db-shm
 *.db-wal
 
+# Cached historical klines for backtesting (large, re-fetchable)
+backtest_data/
+
 # Distribution / packaging
 .Python
 build/
