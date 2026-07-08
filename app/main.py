@@ -97,6 +97,7 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.user_stream = user_stream
     app.state.settings = settings
+    app.state.book_snapshots = book_snapshots
 
     reconciler = Reconciler(engine)
     await reconciler.run()

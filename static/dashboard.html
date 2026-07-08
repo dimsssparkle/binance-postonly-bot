@@ -118,6 +118,7 @@
     <h1>Binance Bot v2 <span class="pill" id="symPill">—</span> <span class="pill" id="levPill">x—</span></h1>
     <div style="display:flex;align-items:center;gap:12px">
       <span class="pill" id="dailyPnlPill">День: —</span>
+      <span class="conn" id="bookStatus" title="Фоновая запись стакана"><span class="dot"></span><span id="bookLabel">стакан: —</span></span>
       <span class="conn" id="connStatus"><span class="dot"></span><span id="connLabel">connecting…</span></span>
     </div>
   </header>
@@ -244,6 +245,17 @@ function renderIntents(intents) {
       <td>${fmtTs(i.updated_at_ms)}</td>
     </tr>
   `).join('');
+}
+
+function renderBookStatus(bookRecorder) {
+  const el = document.getElementById('bookStatus');
+  const label = document.getElementById('bookLabel');
+  if (!bookRecorder) { el.className = 'conn'; label.textContent = 'стакан: —'; return; }
+  const since = bookRecorder.seconds_since_last;
+  const stale = since === null || since === undefined || since > 30;
+  el.className = 'conn ' + (bookRecorder.connected && !stale ? 'live' : 'down');
+  const sinceStr = since === null || since === undefined ? '—' : Math.round(since) + 'с назад';
+  label.textContent = `стакан: ${bookRecorder.snapshots_today ?? 0} сегодня · ${sinceStr}`;
 }
 
 function renderEvents(events) {
@@ -376,6 +388,7 @@ function connect() {
       renderPosition(data.position);
       renderIntents(data.intents);
       renderEvents(data.events);
+      renderBookStatus(data.bookRecorder);
       if (data.netPnlToday !== undefined) {
         const pill = document.getElementById('dailyPnlPill');
         pill.textContent = 'День: ' + fmtNum(data.netPnlToday, 4);

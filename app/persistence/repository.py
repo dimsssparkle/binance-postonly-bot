@@ -336,3 +336,17 @@ class BookSnapshotRepository:
             cur = await self._conn.execute("SELECT COUNT(*) AS n FROM book_snapshots")
         row = await cur.fetchone()
         return int(row["n"]) if row else 0
+
+    async def count_since(self, symbol: str, since_ms: int) -> int:
+        cur = await self._conn.execute(
+            "SELECT COUNT(*) AS n FROM book_snapshots WHERE symbol = ? AND ts_ms >= ?",
+            (symbol.upper(), since_ms),
+        )
+        row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def latest_ts(self, symbol: str) -> Optional[int]:
+        cur = await self._conn.execute(
+            "SELECT MAX(ts_ms) AS ts FROM book_snapshots WHERE symbol = ?", (symbol.upper(),))
+        row = await cur.fetchone()
+        return int(row["ts"]) if row and row["ts"] is not None else None

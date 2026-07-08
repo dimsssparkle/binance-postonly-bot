@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.config import LEVERAGE_DEFAULT
-from app.engine.analytics import daily_net_pnl, round_trip_commission
+from app.engine.analytics import daily_net_pnl, round_trip_commission, start_of_day_ms
 from app.engine.models import Intent
 
 log = logging.getLogger("api.dashboard")
@@ -106,6 +106,24 @@ async def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
     return {"symbol": sym, "position": position, "book": book, "ts": int(time.time() * 1000)}
 
 
+async def _book_recorder_status(request: Request, symbol: str) -> dict[str, Any]:
+    """Лёгкий health-статус фоновой записи стакана — не данные, а состояние
+    самого коллектора (аналог WS-статуса), чтобы было видно, что он жив."""
+    recorder = getattr(request.app.state, "book_recorder", None)
+    if recorder is None:
+        return {"connected": False, "snapshots_today": 0, "seconds_since_last": None}
+    snapshots = request.app.state.book_snapshots
+    since = start_of_day_ms()
+    snapshots_today = await snapshots.count_since(symbol, since)
+    latest_ts = await snapshots.latest_ts(symbol)
+    seconds_since_last = (int(time.time() * 1000) - latest_ts) / 1000.0 if latest_ts else None
+    return {
+        "connected": recorder.connected,
+        "snapshots_today": snapshots_today,
+        "seconds_since_last": seconds_since_last,
+    }
+
+
 @router.get("/dashboard.html", response_class=FileResponse)
 def dashboard_html():
     return FileResponse("static/dashboard.html")
@@ -140,6 +158,13 @@ async def list_events(request: Request, limit: int = 50):
     return {"events": rows}
 
 
+@router.get("/book/status")
+async def book_status(request: Request, symbol: Optional[str] = None):
+    engine = request.app.state.engine
+    sym = (symbol or engine.symbol).upper()
+    return await _book_recorder_status(request, sym)
+
+
 async def _dashboard_sse_gen(request: Request, symbol: str, interval_ms: int):
     engine = request.app.state.engine
     interval = max(500, int(interval_ms)) / 1000.0
@@ -153,6 +178,7 @@ async def _dashboard_sse_gen(request: Request, symbol: str, interval_ms: int):
                 "intents": [await _intent_to_dict(request, i) for i in intents_rows],
                 "events": await engine.events.tail(15),
                 "netPnlToday": str(await daily_net_pnl(engine.intents, engine.orders, symbol)),
+                "bookRecorder": await _book_recorder_status(request, symbol),
             }
             yield f"data: {json.dumps(payload)}\n\n"
         except Exception as e:
