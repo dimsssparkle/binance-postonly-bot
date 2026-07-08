@@ -300,6 +300,13 @@ class ListenKeyRepository:
         )
         await self._conn.commit()
 
+    async def mark_renewed(self) -> None:
+        await self._conn.execute(
+            "UPDATE listen_key_state SET last_renewed_ms = ? WHERE id = 1",
+            (_now_ms(),),
+        )
+        await self._conn.commit()
+
 
 class SettingsRepository:
     """Персистентные runtime-настройки (переопределяют .env после первого
