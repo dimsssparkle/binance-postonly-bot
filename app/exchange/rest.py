@@ -103,6 +103,12 @@ class BinanceRestClient:
         """maker/takerCommissionRate для символа (аккаунт-специфичные, зависят от VIP-тира)."""
         return self.client.sign_request("GET", "/fapi/v1/commissionRate", {"symbol": symbol})
 
+    def get_leverage_brackets(self, symbol: str) -> list[Dict[str, Any]]:
+        """Тиры maintenance margin для символа — нужны только для клиентской
+        ОЦЕНКИ цены ликвидации гипотетической новой позиции на дашборде."""
+        resp = self.client.sign_request("GET", "/fapi/v1/leverageBracket", {"symbol": symbol})
+        return resp[0]["brackets"] if resp else []
+
     # --- Positions / account ---
     def get_position_risk(self, symbol: str | None = None):
         data = self.client.get_position_risk()

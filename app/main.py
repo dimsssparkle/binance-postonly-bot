@@ -18,6 +18,7 @@ from app.engine.reconcile import Reconciler
 from app.engine.state_machine import ExecutionEngine
 from app.exchange.fees import CommissionRateCache
 from app.exchange.filters import SymbolFilterCache
+from app.exchange.leverage_brackets import LeverageBracketCache
 from app.exchange.market_stream import BookDepthRecorder
 from app.exchange.rest import BinanceRestClient
 from app.exchange.ws_userstream import UserDataStream
@@ -54,6 +55,7 @@ async def lifespan(app: FastAPI):
     rest = BinanceRestClient()
     filters = SymbolFilterCache(rest)
     commission_rates = CommissionRateCache(rest)
+    leverage_brackets = LeverageBracketCache(rest)
 
     intents = IntentRepository(conn)
     orders = IntentOrderRepository(conn)
@@ -102,6 +104,7 @@ async def lifespan(app: FastAPI):
     app.state.user_stream = user_stream
     app.state.settings = settings
     app.state.book_snapshots = book_snapshots
+    app.state.leverage_brackets = leverage_brackets
 
     reconciler = Reconciler(engine)
     await reconciler.run()

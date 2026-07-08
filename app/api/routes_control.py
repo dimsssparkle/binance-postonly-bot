@@ -76,11 +76,17 @@ def get_trading_settings(request: Request):
         engine.leverage = engine.rest.get_symbol_leverage(engine.symbol) or engine.leverage
     except Exception as e:
         log.warning(f"[settings] leverage fetch failed, using cached value: {e}")
+    try:
+        brackets = request.app.state.leverage_brackets.get(engine.symbol)
+    except Exception as e:
+        log.warning(f"[settings] leverage brackets fetch failed: {e}")
+        brackets = []
     return {
         "leverage": engine.leverage,
         "qty_default": engine.qty_default,
         "tp_pct": engine.tp_pct, "sl_pct": engine.sl_pct,
         "maker_rate": rates["maker"], "taker_rate": rates["taker"],
+        "brackets": brackets,
     }
 
 

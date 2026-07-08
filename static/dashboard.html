@@ -95,6 +95,7 @@
   td { padding: 8px 8px; border-bottom: 1px solid var(--rule); font-family: var(--mono); font-variant-numeric: tabular-nums; }
   tr:last-child td { border-bottom: none; }
   .table-scroll { overflow-x: auto; }
+  .cell-sub { font-size: 10.5px; color: var(--ink-faint); font-weight: 400; white-space: nowrap; }
 
   .state-pill { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 100px; white-space: nowrap; }
   .state-open, .state-placing_exits { color: var(--open); background: var(--open-bg); }
@@ -230,23 +231,32 @@ function renderPosition(p) {
   updateTpSlPreview();
 }
 
+const ENTRY_METHOD_LABEL = { maker: 'мейкер', market: 'маркет', mixed: 'мейкер+маркет' };
+const EXIT_METHOD_LABEL = { tp: 'TP', sl: 'SL', close_opposite: 'вручную' };
+
 function renderIntents(intents) {
   const tbody = document.querySelector('#intentsTable tbody');
   if (!intents || !intents.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty">пока нет intent-ов</td></tr>'; return; }
-  tbody.innerHTML = intents.map(i => `
+  tbody.innerHTML = intents.map(i => {
+    const entrySub = i.entry_method ? `<br><span class="cell-sub">${ENTRY_METHOD_LABEL[i.entry_method] || i.entry_method}</span>` : '';
+    const exitSub = i.exit_method ? `<br><span class="cell-sub">${EXIT_METHOD_LABEL[i.exit_method] || i.exit_method}</span>` : '';
+    const commissionSub = (i.entry_commission != null || i.exit_commission != null)
+      ? `<br><span class="cell-sub">вход ${fmtNum(i.entry_commission, 5)} / выход ${fmtNum(i.exit_commission, 5)}</span>` : '';
+    return `
     <tr>
       <td>#${i.id}</td>
       <td>${i.desired_side.toUpperCase()}</td>
       <td>${fmtNum(i.qty, 4)}</td>
       <td><span class="state-pill state-${i.state}">${i.state}</span></td>
-      <td>${fmtNum(i.entry_price, 2)}</td>
-      <td>${fmtNum(i.close_price, 2)}</td>
+      <td>${fmtNum(i.entry_price, 2)}${entrySub}</td>
+      <td>${fmtNum(i.close_price, 2)}${exitSub}</td>
       <td class="${i.net_realized_pnl != null ? pnlClass(i.net_realized_pnl) : ''}">${fmtNum(i.net_realized_pnl, 4)}</td>
-      <td>${fmtNum(i.total_commission, 5)}</td>
+      <td>${fmtNum(i.total_commission, 5)}${commissionSub}</td>
       <td>${i.attempt_no}</td>
       <td>${fmtTs(i.updated_at_ms)}</td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function renderBookStatus(bookRecorder) {

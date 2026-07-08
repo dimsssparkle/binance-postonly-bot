@@ -10,14 +10,35 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.engine.analytics import daily_net_pnl, round_trip_commission, start_of_day_ms
-from app.engine.models import Intent
+from app.engine.models import Intent, OrderRole, OrderStatus
 
 log = logging.getLogger("api.dashboard")
 router = APIRouter()
 
+_ENTRY_ROLES = (OrderRole.ENTRY_MAKER, OrderRole.ENTRY_MARKET)
+_EXIT_ROLES = (OrderRole.TP, OrderRole.SL, OrderRole.CLOSE_OPPOSITE)
+
+
+def _entry_method(orders: list) -> Optional[str]:
+    """Как исполнился вход этого intent-а: maker (post-only), market
+    (сразу тейкер или market-фолбэк после неудачных maker-попыток), или
+    mixed (часть объёма maker, часть — market fallback)."""
+    maker_qty = sum(Decimal(o.filled_qty or "0") for o in orders
+                     if o.role == OrderRole.ENTRY_MAKER and o.status == OrderStatus.FILLED)
+    market_qty = sum(Decimal(o.filled_qty or "0") for o in orders
+                      if o.role == OrderRole.ENTRY_MARKET and o.status == OrderStatus.FILLED)
+    if maker_qty > 0 and market_qty > 0:
+        return "mixed"
+    if maker_qty > 0:
+        return "maker"
+    if market_qty > 0:
+        return "market"
+    return None
+
 
 async def _intent_to_dict(request: Request, intent: Intent) -> dict:
     engine = request.app.state.engine
+    orders = await engine.orders.list_for_intent(intent.id)
     closing = await engine.orders.get_closing_fill(intent.id)
     if closing is not None:
         total_commission = await round_trip_commission(engine.intents, engine.orders, intent, closing)
@@ -25,6 +46,10 @@ async def _intent_to_dict(request: Request, intent: Intent) -> dict:
     else:
         total_commission = await engine.orders.sum_all_commission(intent.id)
         net_realized_pnl = None
+
+    entry_commission = sum((Decimal(o.commission or "0") for o in orders if o.role in _ENTRY_ROLES), Decimal("0"))
+    exit_commission = sum((Decimal(o.commission or "0") for o in orders if o.role in _EXIT_ROLES), Decimal("0"))
+
     return {
         "id": intent.id,
         "symbol": intent.symbol,
@@ -33,9 +58,16 @@ async def _intent_to_dict(request: Request, intent: Intent) -> dict:
         "state": intent.state.value,
         "attempt_no": intent.attempt_no,
         "entry_price": intent.entry_price,
+        "entry_method": _entry_method(orders),
         "close_price": closing.filled_price if closing else None,
+        # TP/SL — market-type algo ордера, close_opposite (нетинг-сокращение)
+        # тоже всегда market (см. _reduce_position) — выход всегда taker;
+        # exit_method здесь про МЕХАНИЗМ закрытия, не про maker/taker.
+        "exit_method": closing.role.value if closing else None,
         "net_realized_pnl": str(net_realized_pnl) if net_realized_pnl is not None else None,
         "total_commission": str(total_commission),
+        "entry_commission": str(entry_commission),
+        "exit_commission": str(exit_commission),
         "failure_reason": intent.failure_reason,
         "created_at_ms": intent.created_at_ms,
         "updated_at_ms": intent.updated_at_ms,
@@ -71,6 +103,7 @@ async def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
         "symbol": sym, "positionAmt": "0", "entryPrice": "0",
         "markPrice": "0", "unRealizedProfit": "0", "netUnrealizedProfit": None,
         "leverage": str(engine.leverage),
+        "liquidationPrice": None, "isolatedMargin": None, "notional": None,
     }
     try:
         for p in rest.get_position_risk(sym) or []:
@@ -91,6 +124,11 @@ async def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
                     "netUnrealizedProfit": await _net_unrealized_pnl(
                         request, sym, gross_pnl, mark_price, position_amt),
                     "leverage": p.get("leverage") or str(engine.leverage),
+                    # Реальные (не оценка) — Binance считает liquidationPrice
+                    # сам, с учётом маржи/тиров обслуживания; берём как есть.
+                    "liquidationPrice": p.get("liquidationPrice"),
+                    "isolatedMargin": p.get("isolatedMargin"),
+                    "notional": p.get("notional"),
                 }
                 break
     except Exception as e:
