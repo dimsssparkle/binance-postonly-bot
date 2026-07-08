@@ -53,6 +53,20 @@ class UserDataStream:
         self._stopping = False
         self.connected = False
 
+        # Кэш позиции из ACCOUNT_UPDATE (используется движком вместо REST
+        # get_position_risk в горячих путях — см. ExecutionEngine._get_position).
+        # ORDER_TRADE_UPDATE и ACCOUNT_UPDATE для одного и того же филла —
+        # независимые WS-кадры без гарантии взаимного порядка (тем более при
+        # НЕСКОЛЬКИХ быстрых подряд сделках — простой счётчик "видели ли
+        # ACCOUNT_UPDATE после последнего трейда" тут ломается: он может
+        # случайно совпасть, даже если конкретно ЭТОТ ACCOUNT_UPDATE относится
+        # к более раннему трейду, чем последний увиденный). Поэтому сравниваем
+        # по времени события самой биржи ("E", монотонно неубывающее в потоке),
+        # а не по локально инкрементируемому счётчику.
+        self._position_cache: dict[str, tuple[float, float]] = {}
+        self._last_trade_event_ms: dict[str, int] = {}
+        self._position_cache_event_ms: dict[str, int] = {}
+
     # ------------------------------------------------------------------ #
     # Public API used by the execution engine
     # ------------------------------------------------------------------ #
@@ -69,6 +83,22 @@ class UserDataStream:
     def clear_waiter(self, client_order_id: str) -> None:
         self._waiters.pop(client_order_id, None)
         self._results.pop(client_order_id, None)
+
+    def get_cached_position(self, symbol: str) -> Optional[tuple[float, float]]:
+        """(positionAmt, entryPrice) из последнего ACCOUNT_UPDATE. None, если
+        не подключены, ещё не приходило, ИЛИ этот ACCOUNT_UPDATE по времени
+        события биржи старше последнего уже подтверждённого через
+        ORDER_TRADE_UPDATE филла (значит его ещё не отражает) — в этих
+        случаях вызывающий код обязан откатиться на REST."""
+        if not self.connected:
+            return None
+        sym = symbol.upper()
+        cached = self._position_cache.get(sym)
+        if cached is None:
+            return None
+        if self._position_cache_event_ms.get(sym, -1) < self._last_trade_event_ms.get(sym, 0):
+            return None
+        return cached
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -124,6 +154,12 @@ class UserDataStream:
                 raise
             except Exception as e:
                 self.connected = False
+                # Кэш позиции мог пропустить события за время разрыва (например,
+                # TP/SL сработал, пока мы были офлайн) — не доверяем ему после
+                # реконнекта, пока не придёт свежий ACCOUNT_UPDATE.
+                self._position_cache.clear()
+                self._last_trade_event_ms.clear()
+                self._position_cache_event_ms.clear()
                 log.warning(f"WS disconnected: {e!r}; reconnecting in {backoff:.0f}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
@@ -149,6 +185,8 @@ class UserDataStream:
 
         if kind == "ORDER_TRADE_UPDATE":
             await self._handle_order_trade_update(msg)
+        elif kind == "ACCOUNT_UPDATE":
+            self._handle_account_update(msg)
         elif kind == "listenKeyExpired":
             log.warning("listenKeyExpired event received; forcing reconnect")
             raise RuntimeError("listenKeyExpired")
@@ -171,6 +209,15 @@ class UserDataStream:
         commission_asset = o.get("N") if is_trade else None
         realized_pnl_delta = o.get("rp") if is_trade else None
         filled_price = o.get("ap") if is_trade and float(o.get("ap", 0) or 0) > 0 else None
+
+        # Фиксируем время события ДО обработки статуса/будильника ожидающих —
+        # раньше, чем что-либо в этом же диспатче успеет использовать кэш
+        # позиции (см. get_cached_position).
+        symbol = o.get("s")
+        if is_trade and symbol:
+            event_ms = int(msg.get("E", 0) or 0)
+            if event_ms > self._last_trade_event_ms.get(symbol, 0):
+                self._last_trade_event_ms[symbol] = event_ms
 
         mapped = _STATUS_MAP.get(status)
         intent_order = await self.orders.get_by_client_order_id(client_order_id)
@@ -203,3 +250,21 @@ class UserDataStream:
                     intent_id=intent.id,
                 )
                 log.info(f"[AUTO-CLOSE] intent #{intent.id} -> FLAT ({intent_order.role.value} filled on exchange)")
+
+    def _handle_account_update(self, msg: dict) -> None:
+        """Кэширует positionAmt/entryPrice по символу — не требует I/O,
+        синхронный. См. get_cached_position про защиту от гонки с
+        ORDER_TRADE_UPDATE того же филла (сравнение по времени события "E",
+        а не по локальному счётчику — см. комментарий в __init__)."""
+        event_ms = int(msg.get("E", 0) or 0)
+        for p in msg.get("a", {}).get("P", []):
+            symbol = p.get("s")
+            if not symbol:
+                continue
+            try:
+                pos_amt = float(p.get("pa", 0) or 0)
+                entry_price = float(p.get("ep", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            self._position_cache[symbol] = (pos_amt, entry_price)
+            self._position_cache_event_ms[symbol] = event_ms

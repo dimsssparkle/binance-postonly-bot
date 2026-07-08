@@ -12,6 +12,7 @@ from app.engine.netting import compute_next_action, compute_target_position
 from app.engine.rounding import round_to_step, round_up_to_step
 from app.exchange.fees import CommissionRateCache
 from app.exchange.filters import SymbolFilterCache
+from app.exchange.market_stream import BookDepthRecorder
 from app.exchange.rest import BinanceRestClient
 from app.exchange.ws_userstream import UserDataStream
 from app.persistence.repository import EventLogRepository, IntentOrderRepository, IntentRepository
@@ -49,6 +50,7 @@ class ExecutionEngine:
         sl_pct: float,
         leverage: int,
         commission_rates: Optional[CommissionRateCache] = None,
+        book_recorder: Optional[BookDepthRecorder] = None,
     ) -> None:
         self.rest = rest
         self.filters = filters
@@ -66,6 +68,7 @@ class ExecutionEngine:
         self.sl_pct = sl_pct
         self.leverage = leverage
         self.commission_rates = commission_rates or CommissionRateCache(rest)
+        self.book_recorder = book_recorder
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -246,11 +249,12 @@ class ExecutionEngine:
             remaining = qty - filled_so_far()
             if remaining <= step / 2:
                 return
+            bid, ask = self._get_book(symbol)
             qty_str = round_to_step(remaining, step_s)
-            qty_str = self._ensure_min_notional(symbol, entry_side, qty_str)
+            qty_str = self._ensure_min_notional(bid, ask, symbol, entry_side, qty_str)
 
             seq = await self.intents.increment_attempt(intent.id)
-            price = self._maker_price(symbol, entry_side)
+            price = self._maker_price(bid, ask, symbol, entry_side)
             cid = f"i{intent.id}-entry-{seq}"
             await self.orders.create(intent.id, OrderRole.ENTRY_MAKER, cid, entry_side,
                                       "LIMIT", qty_str, price)
@@ -282,8 +286,9 @@ class ExecutionEngine:
         if remaining <= step / 2:
             return
 
+        bid, ask = self._get_book(symbol)
         rem_str = round_to_step(remaining, step_s)
-        rem_str = self._ensure_min_notional(symbol, entry_side, rem_str)
+        rem_str = self._ensure_min_notional(bid, ask, symbol, entry_side, rem_str)
         seq = await self.intents.increment_attempt(intent.id)
         cid = f"i{intent.id}-entry-market-{seq}"
         await self.orders.create(intent.id, OrderRole.ENTRY_MARKET, cid, entry_side, "MARKET", rem_str, None)
@@ -362,7 +367,12 @@ class ExecutionEngine:
     # Helpers: position/price/rounding
     # ------------------------------------------------------------------ #
     def _get_position(self, symbol: str) -> tuple[float, float]:
-        """(positionAmt, entryPrice) одним REST-вызовом."""
+        """(positionAmt, entryPrice) — из WS-кэша ACCOUNT_UPDATE (near-instant),
+        REST get_position_risk только фолбэк (нет кэша/переподключение/гонка
+        с ORDER_TRADE_UPDATE — см. UserDataStream.get_cached_position)."""
+        cached = self.user_stream.get_cached_position(symbol)
+        if cached is not None:
+            return cached
         for p in self.rest.get_position_risk(symbol) or []:
             if str(p.get("symbol", "")).upper() == symbol.upper():
                 return float(p.get("positionAmt", 0) or 0), float(p.get("entryPrice", 0) or 0)
@@ -371,9 +381,17 @@ class ExecutionEngine:
     def _get_position_amt(self, symbol: str) -> float:
         return self._get_position(symbol)[0]
 
-    def _maker_price(self, symbol: str, side: str) -> str:
+    def _get_book(self, symbol: str) -> tuple[float, float]:
+        """(bid, ask) — из WS-кэша стакана (свежее REST на ~260ms), REST
+        book_ticker только фолбэк (поток не подключён/данные протухли)."""
+        if self.book_recorder is not None:
+            cached = self.book_recorder.get_best_prices()
+            if cached is not None:
+                return cached
         bt = self.rest.book_ticker(symbol)
-        bid, ask = float(bt["bidPrice"]), float(bt["askPrice"])
+        return float(bt["bidPrice"]), float(bt["askPrice"])
+
+    def _maker_price(self, bid: float, ask: float, symbol: str, side: str) -> str:
         tick_s = self.filters.get(symbol)["tickSize"]
         tick = float(tick_s)
         if side == "BUY":
@@ -386,13 +404,12 @@ class ExecutionEngine:
                 target = bid + tick
         return round_to_step(target, tick_s)
 
-    def _ensure_min_notional(self, symbol: str, side: str, qty_str: str) -> str:
+    def _ensure_min_notional(self, bid: float, ask: float, symbol: str, side: str, qty_str: str) -> str:
         filters = self.filters.get(symbol)
         min_notional = float(filters["minNotional"])
         if min_notional <= 0:
             return qty_str
-        bt = self.rest.book_ticker(symbol)
-        price = float(bt["askPrice"] if side == "BUY" else bt["bidPrice"])
+        price = ask if side == "BUY" else bid
         q = float(qty_str)
         if price > 0 and (q * price) < min_notional:
             need = min_notional / price

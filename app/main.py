@@ -64,6 +64,13 @@ async def lifespan(app: FastAPI):
     settings = SettingsRepository(conn)
     book_snapshots = BookSnapshotRepository(conn)
 
+    # Запускаем раньше остального: движок использует его live-кэш bid/ask
+    # для ценообразования ордеров (см. ExecutionEngine._get_book), плюс
+    # по-прежнему копит историю L2 в book_snapshots для будущих depth-стратегий.
+    book_recorder = BookDepthRecorder(book_snapshots, SYMBOL_DEFAULT)
+    await book_recorder.start()
+    app.state.book_recorder = book_recorder
+
     saved_leverage = await settings.get("leverage")
     saved_qty = await settings.get("qty_default")
     saved_tp = await settings.get("tp_pct")
@@ -97,6 +104,7 @@ async def lifespan(app: FastAPI):
         sl_pct=sl_pct,
         leverage=leverage,
         commission_rates=commission_rates,
+        book_recorder=book_recorder,
     )
 
     app.state.rest = rest
@@ -113,12 +121,6 @@ async def lifespan(app: FastAPI):
     strategy_runner = StrategyRunner(strategy, engine)
     await strategy_runner.start()
     app.state.strategy_runner = strategy_runner
-
-    # Фоновая запись стакана (Phase 2.P) — накапливает историю L2 для будущих
-    # depth-стратегий. Не участвует в торговле.
-    book_recorder = BookDepthRecorder(book_snapshots, SYMBOL_DEFAULT)
-    await book_recorder.start()
-    app.state.book_recorder = book_recorder
 
     log.info(f"Startup OK: engine ready for {SYMBOL_DEFAULT}")
     try:

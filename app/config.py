@@ -26,6 +26,12 @@ CLOSE_TIMEOUT_MS = int(os.getenv("CLOSE_TIMEOUT_MS", "2500"))
 MAX_MAKER_ATTEMPTS = int(os.getenv("MAX_MAKER_ATTEMPTS", "3"))
 MAX_CLOSE_RETRIES = int(os.getenv("MAX_CLOSE_RETRIES", "25"))
 
+# Максимальный возраст WS-кэша лучшей цены (BookDepthRecorder), при котором
+# он ещё считается доверенным для ценообразования ордеров — иначе REST
+# фолбэк. Нативный каданс потока ~100ms; 400ms даёт запас на джиттер,
+# оставаясь заметно свежее REST-альтернативы (~259ms по замерам).
+BOOK_CACHE_MAX_STALENESS_MS = int(os.getenv("BOOK_CACHE_MAX_STALENESS_MS", "400"))
+
 TP_PCT = float(os.getenv("TP_PCT", "0.0"))
 SL_PCT = float(os.getenv("SL_PCT", "0.0"))
 
