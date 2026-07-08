@@ -49,6 +49,7 @@ class Intent:
     attempt_no: int = 0
     entry_price: Optional[str] = None
     failure_reason: Optional[str] = None
+    plan_target_amt: Optional[str] = None
     created_at_ms: int = 0
     updated_at_ms: int = 0
 

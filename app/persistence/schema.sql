@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS intents (
     attempt_no      INTEGER NOT NULL DEFAULT 0,
     entry_price     TEXT,
     failure_reason  TEXT,
+    plan_target_amt TEXT,
     created_at_ms   INTEGER NOT NULL,
     updated_at_ms   INTEGER NOT NULL
 );

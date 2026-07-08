@@ -23,6 +23,7 @@ def _row_to_intent(row: aiosqlite.Row) -> Intent:
         attempt_no=row["attempt_no"],
         entry_price=row["entry_price"],
         failure_reason=row["failure_reason"],
+        plan_target_amt=row["plan_target_amt"] if "plan_target_amt" in row.keys() else None,
         created_at_ms=row["created_at_ms"],
         updated_at_ms=row["updated_at_ms"],
     )
@@ -112,6 +113,18 @@ class IntentRepository:
             params.append(value)
         params.append(intent_id)
         await self._conn.execute(f"UPDATE intents SET {', '.join(sets)} WHERE id = ?", params)
+        await self._conn.commit()
+
+    async def set_plan(self, intent_id: int, target_amt: str) -> None:
+        """Персистит вычисленную ЦЕЛЬ (target_amt) БЕЗ изменения state —
+        отдельно от update_state, потому что вызывается сразу после
+        _cancel_exits, а вызывающий держит устаревший локальный Intent
+        (ещё до перехода в CANCELLING_EXITS); передача intent.state туда
+        откатила бы только что записанный переход state."""
+        await self._conn.execute(
+            "UPDATE intents SET plan_target_amt = ?, updated_at_ms = ? WHERE id = ?",
+            (target_amt, _now_ms(), intent_id),
+        )
         await self._conn.commit()
 
     async def increment_attempt(self, intent_id: int) -> int:

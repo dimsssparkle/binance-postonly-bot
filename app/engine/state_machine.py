@@ -8,8 +8,8 @@ from binance.error import ClientError
 from app.engine.exceptions import EngineBusyError, EngineFailure
 from app.engine.fees import solve_exit_price_for_net_pnl
 from app.engine.models import Intent, IntentState, OrderRole, OrderStatus, Side
+from app.engine.netting import compute_next_action, compute_target_position
 from app.engine.rounding import round_to_step, round_up_to_step
-from app.exchange.errors import POST_ONLY_WOULD_CROSS, is_code
 from app.exchange.fees import CommissionRateCache
 from app.exchange.filters import SymbolFilterCache
 from app.exchange.rest import BinanceRestClient
@@ -80,7 +80,7 @@ class ExecutionEngine:
             # OPEN is a steady state, not "in-flight" — a new signal (including
             # a close/FLAT signal) supersedes it. Mark it resolved so the new
             # intent doesn't collide with the one-active-intent-per-symbol index;
-            # the new intent's own _cancel_exits/_close_opposite steps handle
+            # the new intent's own _cancel_exits/_reduce_position steps handle
             # the actual exchange-side cleanup of the position it's superseding.
             await self.intents.update_state(active.id, IntentState.FLAT)
 
@@ -100,17 +100,53 @@ class ExecutionEngine:
         assert intent is not None
         try:
             await self._cancel_exits(intent)
-            await self._close_opposite(intent)
+
+            step = float(self.filters.get(intent.symbol)["stepSize"])
+            if intent.plan_target_amt is None:
+                # Первый проход этого intent-а: (side, qty) трактуется как
+                # СИГНАЛ-ДЕЛЬТА относительно текущей позиции (не абсолютный
+                # целевой размер) — считаем ЦЕЛЬ (знаковый target-position)
+                # ОДИН раз и персистим немедленно. На повторном запуске
+                # (после краха/рестарта) цель читается обратно, а НЕ
+                # пересчитывается заново от текущей позиции — иначе часть
+                # уже исполненной на бирже дельты потерялась бы.
+                existing_amt = self._get_position_amt(intent.symbol)
+                target_amt = compute_target_position(
+                    existing_amt, intent.desired_side, float(intent.qty), step)
+                await self.intents.set_plan(intent.id, str(target_amt))
+            else:
+                target_amt = float(intent.plan_target_amt)
+
+            # А вот ЧТО делать прямо сейчас (close_qty/open_qty) безопасно
+            # пересчитывать заново от ЖИВОЙ текущей позиции относительно
+            # зафиксированной цели на КАЖДОМ проходе, в т.ч. после краха:
+            # цель неизменна, текущая позиция всегда актуальна, а разница
+            # между ними и есть ровно то, что осталось сделать — никакого
+            # отдельного учёта "сколько уже закрыто в этом вызове" не нужно.
+            current_amt = self._get_position_amt(intent.symbol)
+            close_qty, open_qty = compute_next_action(current_amt, target_amt, step)
+
+            if close_qty > step / 2:
+                await self._reduce_position(intent, close_qty)
 
             if intent.desired_side == Side.FLAT:
                 await self.intents.update_state(intent.id, IntentState.FLAT)
                 await self.events.append("engine", "state_transition", {"to": "flat"}, intent.id)
                 return
 
-            await self._enter_position(intent)
+            if open_qty > step / 2:
+                await self._enter_position(intent, open_qty)
+
+            # Безусловно — в т.ч. после частичного сокращения (open_qty==0,
+            # но позиция всё ещё открыта меньшим объёмом): старые TP/SL уже
+            # снесены _cancel_exits, без этого позиция осталась бы без
+            # защиты. Собственный guard entry_price<=0 внутри — корректный
+            # no-op для случая полного закрытия.
             await self._place_exits(intent)
-            await self.intents.update_state(intent.id, IntentState.OPEN)
-            await self.events.append("engine", "state_transition", {"to": "open"}, intent.id)
+            final_amt = self._get_position_amt(intent.symbol)
+            final_state = IntentState.OPEN if abs(final_amt) > step / 2 else IntentState.FLAT
+            await self.intents.update_state(intent.id, final_state)
+            await self.events.append("engine", "state_transition", {"to": final_state.value}, intent.id)
         except EngineFailure as e:
             await self.intents.update_state(intent.id, IntentState.FAILED, failure_reason=str(e))
             await self.events.append("engine", "intent_failed", {"reason": str(e)}, intent.id)
@@ -132,99 +168,87 @@ class ExecutionEngine:
         await self.events.append("engine", "state_transition", {"to": "cancelling_exits"}, intent.id)
 
     # ------------------------------------------------------------------ #
-    # Step 2: close opposite-side position if any
+    # Step 2: reduce/close the position by an explicit qty (netting plan)
     # ------------------------------------------------------------------ #
-    async def _close_opposite(self, intent: Intent) -> None:
+    async def _reduce_position(self, intent: Intent, target_close_qty: float) -> None:
+        """Рыночным reduce-only ордером сокращает позицию на target_close_qty
+        (не 'весь противоположный остаток' — сколько закрыть решает вызывающий
+        через compute_next_action). Всегда market, без post-only попытки —
+        закрытие/защита существующей позиции важнее экономии на комиссии."""
         await self.intents.update_state(intent.id, IntentState.CLOSING_OPPOSITE)
         await self.events.append("engine", "state_transition", {"to": "closing_opposite"}, intent.id)
 
         symbol = intent.symbol
         step = float(self.filters.get(symbol)["stepSize"])
-        side = intent.desired_side
+
+        start_amt = self._get_position_amt(symbol)
+        start_abs = abs(start_amt)
+        if start_abs <= step / 2:
+            return
+        close_side = "BUY" if start_amt < 0 else "SELL"
 
         def needs_close(pos_amt: float) -> bool:
-            if side == Side.LONG:
-                return pos_amt < 0
-            if side == Side.SHORT:
-                return pos_amt > 0
-            return pos_amt != 0  # FLAT: закрываем любую позицию
+            return pos_amt < 0 if close_side == "BUY" else pos_amt > 0
 
-        pos_amt = self._get_position_amt(symbol)
-        if not needs_close(pos_amt):
-            return
-
-        close_side = "BUY" if pos_amt < 0 else "SELL"
-        attempts = 0
-        while attempts < self.max_close_retries:
+        for _ in range(self.max_close_retries):
             pos_amt = self._get_position_amt(symbol)
             if not needs_close(pos_amt):
-                return
-            rem = abs(pos_amt)
-            if rem <= step / 2:
-                return
+                break
+            remaining = target_close_qty - (start_abs - abs(pos_amt))
+            if remaining <= step / 2:
+                break
+            qty_str = round_to_step(min(remaining, abs(pos_amt)), step)
+            if float(qty_str) <= step / 2:
+                break
 
-            attempts += 1
             seq = await self.intents.increment_attempt(intent.id)
-            qty_str = round_to_step(rem, step)
-            price = self._maker_price(symbol, close_side)
-            cid = f"i{intent.id}-close-{seq}"
+            cid = f"i{intent.id}-reduce-{seq}"
             await self.orders.create(intent.id, OrderRole.CLOSE_OPPOSITE, cid, close_side,
-                                      "LIMIT", qty_str, price)
-
+                                      "MARKET", qty_str, None)
             try:
-                self.rest.place_limit_post_only(symbol, close_side, qty_str, price,
-                                                 reduce_only=True, new_client_order_id=cid)
-                await self.orders.update_status(cid, OrderStatus.ACKED)
+                self.rest.place_market(symbol, close_side, qty_str,
+                                        reduce_only=True, new_client_order_id=cid)
+                await self._wait_for_fill(cid, timeout_ms=self.close_timeout_ms)
             except ClientError as e:
-                if is_code(e, POST_ONLY_WOULD_CROSS):
-                    mkt_cid = f"{cid}-mkt"
-                    await self.orders.create(intent.id, OrderRole.CLOSE_OPPOSITE, mkt_cid,
-                                              close_side, "MARKET", qty_str, None)
-                    try:
-                        self.rest.place_market(symbol, close_side, qty_str,
-                                                reduce_only=True, new_client_order_id=mkt_cid)
-                        filled = await self._wait_for_fill(mkt_cid, timeout_ms=int(self.close_timeout_ms * 0.5))
-                        if filled or not needs_close(self._get_position_amt(symbol)):
-                            return
-                    except ClientError as e2:
-                        log.warning(f"[CLOSE] market fallback failed: {e2}")
-                    await asyncio.sleep(self.order_timeout_ms / 1000)
-                    continue
-                log.warning(f"[CLOSE] post-only place failed: {e}")
+                log.warning(f"[REDUCE] market close failed: {e}")
                 await asyncio.sleep(self.order_timeout_ms / 1000)
-                continue
-
-            filled = await self._wait_for_fill(cid, timeout_ms=self.close_timeout_ms)
-            if filled:
-                return
-            try:
-                self.rest.cancel_order(symbol, orig_client_order_id=cid)
-                await self.orders.update_status(cid, OrderStatus.CANCELED)
-            except ClientError:
-                pass
-            await asyncio.sleep(self.order_timeout_ms / 1000)
-
-        raise EngineFailure("failed to close opposite position in time")
+        else:
+            final_amt = self._get_position_amt(symbol)
+            if needs_close(final_amt) and abs(final_amt) > step / 2:
+                raise EngineFailure("failed to reduce position in time")
 
     # ------------------------------------------------------------------ #
-    # Step 3: enter new position (post-only maker, market fallback)
+    # Step 3: enter/add qty in `side` direction (post-only maker, market fallback)
     # ------------------------------------------------------------------ #
-    async def _enter_position(self, intent: Intent) -> None:
+    async def _enter_position(self, intent: Intent, qty: float) -> None:
+        """Открывает/добавляет ровно qty в направлении intent.desired_side —
+        qty здесь ВСЕГДА уже конкретная величина к исполнению (open_qty_final
+        из netting-плана в _run_intent), не intent.qty напрямую."""
         symbol = intent.symbol
         side = intent.desired_side
         entry_side = "BUY" if side == Side.LONG else "SELL"
-        step = self.filters.get(symbol)["stepSize"]
+        step_s = self.filters.get(symbol)["stepSize"]
+        step = float(step_s)
 
-        qty_str = round_to_step(float(intent.qty), step)
-        qty_str = self._ensure_min_notional(symbol, entry_side, qty_str)
+        start_amt = self._get_position_amt(symbol)
 
-        if self._position_reached(symbol, entry_side, float(qty_str)):
-            return
+        def filled_so_far() -> float:
+            # Знаковое изменение позиции с начала входа, спроецированное на
+            # направление входа — сколько из qty уже реально исполнено на
+            # бирже (переживает частичные фейлы/отмены между попытками).
+            cur = self._get_position_amt(symbol)
+            return (cur - start_amt) if entry_side == "BUY" else (start_amt - cur)
 
         await self.intents.update_state(intent.id, IntentState.ENTRY_MAKER_PENDING)
         await self.events.append("engine", "state_transition", {"to": "entry_maker_pending"}, intent.id)
 
         for attempt in range(1, self.max_maker_attempts + 1):
+            remaining = qty - filled_so_far()
+            if remaining <= step / 2:
+                return
+            qty_str = round_to_step(remaining, step_s)
+            qty_str = self._ensure_min_notional(symbol, entry_side, qty_str)
+
             seq = await self.intents.increment_attempt(intent.id)
             price = self._maker_price(symbol, entry_side)
             cid = f"i{intent.id}-entry-{seq}"
@@ -254,11 +278,11 @@ class ExecutionEngine:
         await self.intents.update_state(intent.id, IntentState.ENTRY_MARKET_PENDING)
         await self.events.append("engine", "state_transition", {"to": "entry_market_pending"}, intent.id)
 
-        remaining = self._remaining_to_target(symbol, entry_side, float(qty_str))
-        if remaining <= float(step) / 2:
+        remaining = qty - filled_so_far()
+        if remaining <= step / 2:
             return
 
-        rem_str = round_to_step(remaining, step)
+        rem_str = round_to_step(remaining, step_s)
         rem_str = self._ensure_min_notional(symbol, entry_side, rem_str)
         seq = await self.intents.increment_attempt(intent.id)
         cid = f"i{intent.id}-entry-market-{seq}"
@@ -274,7 +298,6 @@ class ExecutionEngine:
         await self.events.append("engine", "state_transition", {"to": "placing_exits"}, intent.id)
 
         symbol = intent.symbol
-        side = intent.desired_side
         # Один REST-вызов вместо двух: entry_price и position_amt приходят в
         # одном и том же ответе get_position_risk, момент времени один и тот же.
         pos_amt, entry_price = self._get_position(symbol)
@@ -283,6 +306,11 @@ class ExecutionEngine:
         if entry_price <= 0 or (self.tp_pct <= 0 and self.sl_pct <= 0):
             return
 
+        # Реальная сторона ПОЗИЦИИ, не intent.desired_side — после частичного
+        # сокращения (netting-план: close_qty>0, open_qty=0) они расходятся:
+        # результат может остаться открытым в СТАРОМ направлении, а не в том,
+        # что было в сигнале. TP/SL обязаны считаться от факта на бирже.
+        side = Side.LONG if pos_amt > 0 else Side.SHORT
         tick = self.filters.get(symbol)["tickSize"]
         close_side = "SELL" if side == Side.LONG else "BUY"
 
@@ -343,9 +371,6 @@ class ExecutionEngine:
     def _get_position_amt(self, symbol: str) -> float:
         return self._get_position(symbol)[0]
 
-    def _get_entry_price(self, symbol: str) -> float:
-        return self._get_position(symbol)[1]
-
     def _maker_price(self, symbol: str, side: str) -> str:
         bt = self.rest.book_ticker(symbol)
         bid, ask = float(bt["bidPrice"]), float(bt["askPrice"])
@@ -373,16 +398,6 @@ class ExecutionEngine:
             need = min_notional / price
             return round_up_to_step(need, filters["stepSize"])
         return qty_str
-
-    def _position_reached(self, symbol: str, side: str, target_qty: float) -> bool:
-        amt = self._get_position_amt(symbol)
-        need = target_qty * 0.999
-        return (amt >= need) if side == "BUY" else (-amt >= need)
-
-    def _remaining_to_target(self, symbol: str, side: str, target_qty: float) -> float:
-        amt = self._get_position_amt(symbol)
-        current_same_dir = max(amt, 0.0) if side == "BUY" else max(-amt, 0.0)
-        return max(0.0, target_qty - current_same_dir)
 
     # ------------------------------------------------------------------ #
     # Fill waiting — event-driven off the WebSocket user data stream.
