@@ -111,6 +111,18 @@ class BinanceRestClient:
             data = [p for p in data if str(p.get("symbol", "")).upper() == sym]
         return data
 
+    def get_symbol_leverage(self, symbol: str) -> Optional[int]:
+        """Настоящее настроенное плечо по символу с аккаунта. В отличие от
+        get_position_risk (не возвращает строку для плоского символа вовсе),
+        /fapi/v2/account отдаёт leverage для каждого символа независимо от
+        того, есть ли открытая позиция."""
+        acc = self.client.sign_request("GET", "/fapi/v2/account", {})
+        sym = symbol.upper()
+        for p in acc.get("positions", []):
+            if str(p.get("symbol", "")).upper() == sym:
+                return int(p["leverage"])
+        return None
+
     # --- User Data Stream (listenKey) ---
     def new_listen_key(self) -> str:
         resp = self.client.new_listen_key()

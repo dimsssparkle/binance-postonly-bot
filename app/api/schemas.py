@@ -20,7 +20,9 @@ class ManualTradePayload(BaseModel):
         return _validate_side(v)
 
 
-class TpSlSettingsPayload(BaseModel):
+class TradingSettingsPayload(BaseModel):
+    leverage: Optional[int] = None
+    qty: Optional[float] = None
     tp_pct: Optional[float] = None
     sl_pct: Optional[float] = None
 
@@ -29,4 +31,18 @@ class TpSlSettingsPayload(BaseModel):
     def validate_non_negative(cls, v: Optional[float]) -> Optional[float]:
         if v is not None and v < 0:
             raise ValueError("must be >= 0")
+        return v
+
+    @field_validator("qty")
+    @classmethod
+    def validate_qty(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            raise ValueError("qty must be > 0")
+        return v
+
+    @field_validator("leverage")
+    @classmethod
+    def validate_leverage(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (1 <= v <= 125):
+            raise ValueError("leverage must be between 1 and 125")
         return v

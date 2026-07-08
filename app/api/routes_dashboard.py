@@ -9,7 +9,6 @@ from typing import Any, Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.config import LEVERAGE_DEFAULT
 from app.engine.analytics import daily_net_pnl, round_trip_commission, start_of_day_ms
 from app.engine.models import Intent
 
@@ -65,12 +64,13 @@ async def _net_unrealized_pnl(request: Request, sym: str, gross_pnl: float,
 
 async def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
     rest = request.app.state.rest
+    engine = request.app.state.engine
     sym = symbol.upper()
 
     position: dict[str, Any] = {
         "symbol": sym, "positionAmt": "0", "entryPrice": "0",
         "markPrice": "0", "unRealizedProfit": "0", "netUnrealizedProfit": None,
-        "leverage": str(LEVERAGE_DEFAULT),
+        "leverage": str(engine.leverage),
     }
     try:
         for p in rest.get_position_risk(sym) or []:
@@ -78,7 +78,7 @@ async def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
                 # Binance omits flat symbols from position_risk entirely, so
                 # this branch (and its real leverage figure) is only hit while
                 # a position is actually open — the dict default above covers
-                # the flat case with the configured leverage instead of "0".
+                # the flat case with the cached (last-known-set) leverage.
                 gross_pnl = float(p.get("unRealizedProfit", "0") or 0)
                 mark_price = float(p.get("markPrice", "0") or 0)
                 position_amt = float(p.get("positionAmt", "0") or 0)
@@ -90,7 +90,7 @@ async def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
                     "unRealizedProfit": p.get("unRealizedProfit", "0"),
                     "netUnrealizedProfit": await _net_unrealized_pnl(
                         request, sym, gross_pnl, mark_price, position_amt),
-                    "leverage": p.get("leverage") or str(LEVERAGE_DEFAULT),
+                    "leverage": p.get("leverage") or str(engine.leverage),
                 }
                 break
     except Exception as e:

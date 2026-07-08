@@ -33,7 +33,7 @@ logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s:
 log = logging.getLogger("app")
 
 
-def _ensure_symbol_setup(rest: BinanceRestClient, symbol: str) -> None:
+def _ensure_symbol_setup(rest: BinanceRestClient, symbol: str, leverage: int) -> None:
     try:
         rest.set_position_mode(hedge=(HEDGE_MODE.lower() == "on"))
     except Exception as e:
@@ -43,7 +43,7 @@ def _ensure_symbol_setup(rest: BinanceRestClient, symbol: str) -> None:
     except Exception as e:
         log.warning(f"Failed to set margin type: {e}")
     try:
-        rest.set_leverage(symbol, LEVERAGE_DEFAULT)
+        rest.set_leverage(symbol, leverage)
     except Exception as e:
         log.warning(f"Failed to set leverage: {e}")
 
@@ -55,8 +55,6 @@ async def lifespan(app: FastAPI):
     filters = SymbolFilterCache(rest)
     commission_rates = CommissionRateCache(rest)
 
-    _ensure_symbol_setup(rest, SYMBOL_DEFAULT)
-
     intents = IntentRepository(conn)
     orders = IntentOrderRepository(conn)
     events = EventLogRepository(conn)
@@ -64,10 +62,16 @@ async def lifespan(app: FastAPI):
     settings = SettingsRepository(conn)
     book_snapshots = BookSnapshotRepository(conn)
 
+    saved_leverage = await settings.get("leverage")
+    saved_qty = await settings.get("qty_default")
     saved_tp = await settings.get("tp_pct")
     saved_sl = await settings.get("sl_pct")
+    leverage = int(saved_leverage) if saved_leverage is not None else LEVERAGE_DEFAULT
+    qty_default = saved_qty if saved_qty is not None else str(QTY_DEFAULT)
     tp_pct = float(saved_tp) if saved_tp is not None else TP_PCT
     sl_pct = float(saved_sl) if saved_sl is not None else SL_PCT
+
+    _ensure_symbol_setup(rest, SYMBOL_DEFAULT, leverage)
 
     user_stream = UserDataStream(
         rest=rest, listen_keys=listen_keys, orders=orders, intents=intents, events=events,
@@ -82,13 +86,14 @@ async def lifespan(app: FastAPI):
         events=events,
         user_stream=user_stream,
         symbol=SYMBOL_DEFAULT,
-        qty_default=str(QTY_DEFAULT),
+        qty_default=qty_default,
         order_timeout_ms=ORDER_TIMEOUT_MS,
         close_timeout_ms=CLOSE_TIMEOUT_MS,
         max_maker_attempts=MAX_MAKER_ATTEMPTS,
         max_close_retries=MAX_CLOSE_RETRIES,
         tp_pct=tp_pct,
         sl_pct=sl_pct,
+        leverage=leverage,
         commission_rates=commission_rates,
     )
 

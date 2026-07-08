@@ -47,6 +47,7 @@ class ExecutionEngine:
         max_close_retries: int,
         tp_pct: float,
         sl_pct: float,
+        leverage: int,
         commission_rates: Optional[CommissionRateCache] = None,
     ) -> None:
         self.rest = rest
@@ -63,6 +64,7 @@ class ExecutionEngine:
         self.max_close_retries = max_close_retries
         self.tp_pct = tp_pct
         self.sl_pct = sl_pct
+        self.leverage = leverage
         self.commission_rates = commission_rates or CommissionRateCache(rest)
 
     # ------------------------------------------------------------------ #
