@@ -134,32 +134,21 @@
         <dt>Маркет</dt><dd id="posMark">—</dd>
         <dt>uPnL (gross)</dt><dd class="big" id="posPnl">—</dd>
         <dt>uPnL (net)</dt><dd class="big" id="posPnlNet">—</dd>
+        <dt>Маржа</dt><dd id="posMargin">—</dd>
+        <dt>Notional</dt><dd id="posNotional">—</dd>
+        <dt>Ликвидация</dt><dd id="posLiq">—</dd>
         <dt>Bid/Ask</dt><dd id="posBook">—</dd>
       </dl>
     </div>
 
     <div class="card">
-      <h2>Действия <span style="text-transform:none;font-weight:400">(реальный счёт)</span></h2>
-      <div class="actions">
-        <div class="qty-row">
-          Qty: <input type="number" id="qtyInput" step="0.001" placeholder="по умолчанию"/>
-        </div>
-        <div class="row">
-          <button class="long" id="btnLong">LONG</button>
-          <button class="short" id="btnShort">SHORT</button>
-        </div>
-        <div class="row">
-          <button class="close" id="btnClose">CLOSE</button>
-        </div>
-        <div class="action-msg" id="actionMsg"></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Настройки торговли <span style="text-transform:none;font-weight:400">(плечо — сразу на бирже; qty/TP/SL — для будущих сделок)</span></h2>
+      <h2>Торговля <span style="text-transform:none;font-weight:400">(реальный счёт; плечо — сразу на бирже, qty/TP/SL — для будущих сделок)</span></h2>
       <div class="actions">
         <div class="qty-row">Плечо: <input type="number" id="leverageInput" step="1" min="1" max="125" placeholder="—"/></div>
-        <div class="qty-row">Qty по умолчанию: <input type="number" id="qtyDefaultInput" step="0.001" min="0.001" placeholder="—"/></div>
+        <div class="qty-row">
+          Qty: <input type="number" id="qtyInput" step="0.001" min="0.001" placeholder="—"/>
+          <span class="cell-sub" id="qtyInfo">—</span>
+        </div>
         <div class="qty-row">TP %: <input type="number" id="tpInput" step="0.01" placeholder="—"/></div>
         <div class="qty-row">SL %: <input type="number" id="slInput" step="0.01" placeholder="—"/></div>
         <div class="row"><button id="btnSaveTpSl">Сохранить</button></div>
@@ -167,7 +156,16 @@
         <dl class="kv" id="tpslPreview" style="margin-top:6px">
           <dt>Если LONG сейчас</dt><dd id="previewLong">—</dd>
           <dt>Если SHORT сейчас</dt><dd id="previewShort">—</dd>
+          <dt>Ликвидация (оценка)</dt><dd id="previewLiq">—</dd>
         </dl>
+        <div class="row" style="margin-top:6px">
+          <button class="long" id="btnLong">LONG</button>
+          <button class="short" id="btnShort">SHORT</button>
+        </div>
+        <div class="row">
+          <button class="close" id="btnClose">CLOSE</button>
+        </div>
+        <div class="action-msg" id="actionMsg"></div>
       </div>
     </div>
   </div>
@@ -225,6 +223,9 @@ function renderPosition(p) {
     pnlNetEl.textContent = fmtNum(pos.netUnrealizedProfit, 4);
     pnlNetEl.className = 'big ' + pnlClass(pos.netUnrealizedProfit);
   }
+  document.getElementById('posMargin').textContent = fmtNum(pos.isolatedMargin, 4);
+  document.getElementById('posNotional').textContent = fmtNum(pos.notional, 2);
+  document.getElementById('posLiq').textContent = fmtNum(pos.liquidationPrice, 2);
   const book = p.book || {};
   document.getElementById('posBook').textContent = (book.bidPrice || "—") + " / " + (book.askPrice || "—");
   lastBook = book;
@@ -322,14 +323,44 @@ document.getElementById('btnClose').onclick = () => {
 };
 
 const leverageInput = document.getElementById('leverageInput');
-const qtyDefaultInput = document.getElementById('qtyDefaultInput');
 const tpInput = document.getElementById('tpInput');
 const slInput = document.getElementById('slInput');
 const tpslMsg = document.getElementById('tpslMsg');
 const btnSaveTpSl = document.getElementById('btnSaveTpSl');
 
 let lastRates = { maker: 0, taker: 0 };
+let lastBrackets = [];
 let lastBook = null;
+
+// maintMarginRatio тира, в диапазон [notionalFloor, notionalCap) которого
+// попадает notional гипотетической позиции — так же брекеты применяет сам
+// Binance при расчёте реальной ликвидации уже открытой позиции.
+function mmrForNotional(notional) {
+  for (const b of lastBrackets) {
+    if (notional >= b.notionalFloor && notional < b.notionalCap) return b.maintMarginRatio;
+  }
+  return lastBrackets.length ? lastBrackets[lastBrackets.length - 1].maintMarginRatio : 0;
+}
+
+// Стандартная оценочная формула Binance для изолированной маржи, свежей
+// позиции (без учёта уже накопленного unrealized PnL/доп. маржи) — ровно
+// то приближение, которым сам Binance объясняет расчёт ликвидации.
+function estimateLiquidation(entryPrice, leverage, mmr, side) {
+  if (!leverage) return null;
+  const imr = 1 / leverage;
+  return side === 'LONG' ? entryPrice * (1 - imr + mmr) : entryPrice * (1 + imr - mmr);
+}
+
+function updateQtyInfo() {
+  const infoEl = document.getElementById('qtyInfo');
+  const qty = Number(qtyInput.value);
+  const leverage = Number(leverageInput.value);
+  if (!qty || !lastBook || !lastBook.bidPrice || !lastBook.askPrice) { infoEl.textContent = '—'; return; }
+  const mid = (Number(lastBook.bidPrice) + Number(lastBook.askPrice)) / 2;
+  const notional = qty * mid;
+  const margin = leverage ? notional / leverage : null;
+  infoEl.textContent = `≈ ${fmtNum(notional, 2)} USDT позиция` + (margin != null ? ` / ${fmtNum(margin, 2)} USDT маржа` : '');
+}
 
 // Цена входа не влияет на итоговую цену TP/SL после сокращения (target и
 // комиссия входа масштабируются вместе с qty*entry_price), поэтому превью
@@ -345,20 +376,36 @@ function estimateExitPrice(entryPrice, pct, isLoss, side, makerRate, takerRate) 
 function updateTpSlPreview() {
   const previewLongEl = document.getElementById('previewLong');
   const previewShortEl = document.getElementById('previewShort');
+  const previewLiqEl = document.getElementById('previewLiq');
+  updateQtyInfo();
   if (!lastBook || !lastBook.bidPrice || !lastBook.askPrice) {
-    previewLongEl.textContent = '—'; previewShortEl.textContent = '—';
+    previewLongEl.textContent = '—'; previewShortEl.textContent = '—'; previewLiqEl.textContent = '—';
     return;
   }
   const tpPct = Number(tpInput.value) / 100;
   const slPct = Number(slInput.value) / 100;
   const mid = (Number(lastBook.bidPrice) + Number(lastBook.askPrice)) / 2;
-  if (!tpPct && !slPct) { previewLongEl.textContent = '—'; previewShortEl.textContent = '—'; return; }
-  const longTp = tpPct ? estimateExitPrice(mid, tpPct, false, 'LONG', lastRates.maker, lastRates.taker) : null;
-  const longSl = slPct ? estimateExitPrice(mid, slPct, true, 'LONG', lastRates.maker, lastRates.taker) : null;
-  const shortTp = tpPct ? estimateExitPrice(mid, tpPct, false, 'SHORT', lastRates.maker, lastRates.taker) : null;
-  const shortSl = slPct ? estimateExitPrice(mid, slPct, true, 'SHORT', lastRates.maker, lastRates.taker) : null;
-  previewLongEl.textContent = `TP ${fmtNum(longTp, 2)} / SL ${fmtNum(longSl, 2)}`;
-  previewShortEl.textContent = `TP ${fmtNum(shortTp, 2)} / SL ${fmtNum(shortSl, 2)}`;
+  if (tpPct || slPct) {
+    const longTp = tpPct ? estimateExitPrice(mid, tpPct, false, 'LONG', lastRates.maker, lastRates.taker) : null;
+    const longSl = slPct ? estimateExitPrice(mid, slPct, true, 'LONG', lastRates.maker, lastRates.taker) : null;
+    const shortTp = tpPct ? estimateExitPrice(mid, tpPct, false, 'SHORT', lastRates.maker, lastRates.taker) : null;
+    const shortSl = slPct ? estimateExitPrice(mid, slPct, true, 'SHORT', lastRates.maker, lastRates.taker) : null;
+    previewLongEl.textContent = `TP ${fmtNum(longTp, 2)} / SL ${fmtNum(longSl, 2)}`;
+    previewShortEl.textContent = `TP ${fmtNum(shortTp, 2)} / SL ${fmtNum(shortSl, 2)}`;
+  } else {
+    previewLongEl.textContent = '—'; previewShortEl.textContent = '—';
+  }
+
+  const leverage = Number(leverageInput.value);
+  const qty = Number(qtyInput.value);
+  if (leverage && qty) {
+    const mmr = mmrForNotional(qty * mid);
+    const liqLong = estimateLiquidation(mid, leverage, mmr, 'LONG');
+    const liqShort = estimateLiquidation(mid, leverage, mmr, 'SHORT');
+    previewLiqEl.textContent = `LONG ${fmtNum(liqLong, 2)} / SHORT ${fmtNum(liqShort, 2)}`;
+  } else {
+    previewLiqEl.textContent = '—';
+  }
 }
 
 async function loadTradingSettings() {
@@ -366,10 +413,11 @@ async function loadTradingSettings() {
     const r = await fetch('/settings/trading');
     const j = await r.json();
     leverageInput.value = j.leverage != null ? j.leverage.toString() : '';
-    qtyDefaultInput.value = j.qty_default != null ? j.qty_default.toString() : '';
+    qtyInput.value = j.qty_default != null ? j.qty_default.toString() : '';
     tpInput.value = (Number(j.tp_pct) * 100).toString();
     slInput.value = (Number(j.sl_pct) * 100).toString();
     lastRates = { maker: Number(j.maker_rate || 0), taker: Number(j.taker_rate || 0) };
+    lastBrackets = j.brackets || [];
     updateTpSlPreview();
   } catch (e) { tpslMsg.textContent = 'Не удалось загрузить настройки'; }
 }
@@ -380,7 +428,7 @@ btnSaveTpSl.onclick = async () => {
   try {
     const body = { tp_pct: Number(tpInput.value) / 100, sl_pct: Number(slInput.value) / 100 };
     if (leverageInput.value !== '') body.leverage = Number(leverageInput.value);
-    if (qtyDefaultInput.value !== '') body.qty = Number(qtyDefaultInput.value);
+    if (qtyInput.value !== '') body.qty = Number(qtyInput.value);
     const r = await fetch('/settings/trading', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
     const j = await r.json();
     if (!r.ok) { tpslMsg.textContent = 'Ошибка: ' + (j.detail || r.status); }
@@ -388,7 +436,8 @@ btnSaveTpSl.onclick = async () => {
       tpslMsg.textContent = `Сохранено: плечо x${j.leverage}, qty ${j.qty_default}, ` +
         `TP ${(j.tp_pct*100).toFixed(3)}% / SL ${(j.sl_pct*100).toFixed(3)}% (qty/TP/SL — для будущих сделок)`;
       leverageInput.value = j.leverage != null ? j.leverage.toString() : '';
-      qtyDefaultInput.value = j.qty_default != null ? j.qty_default.toString() : '';
+      qtyInput.value = j.qty_default != null ? j.qty_default.toString() : '';
+      updateTpSlPreview();
     }
   } catch (e) {
     tpslMsg.textContent = 'Ошибка сети: ' + e;
@@ -398,6 +447,8 @@ btnSaveTpSl.onclick = async () => {
 };
 tpInput.addEventListener('input', updateTpSlPreview);
 slInput.addEventListener('input', updateTpSlPreview);
+leverageInput.addEventListener('input', updateTpSlPreview);
+qtyInput.addEventListener('input', updateTpSlPreview);
 loadTradingSettings();
 
 let es;
