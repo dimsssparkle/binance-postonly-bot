@@ -59,3 +59,22 @@ CREATE TABLE IF NOT EXISTS listen_key_state (
     created_at_ms   INTEGER,
     last_renewed_ms INTEGER
 );
+
+-- Компактные снимки стакана (top-N глубина), пишутся ~раз в 2с. Накапливаем
+-- свою историю L2, которой нет в бесплатных klines, чтобы depth-стратегии
+-- стали бэктестируемыми позже. Не используется первой стратегией.
+CREATE TABLE IF NOT EXISTS book_snapshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms         INTEGER NOT NULL,
+    symbol        TEXT NOT NULL,
+    best_bid      TEXT,
+    best_bid_qty  TEXT,
+    best_ask      TEXT,
+    best_ask_qty  TEXT,
+    bid_depth     TEXT,   -- сумма qty по top-N бидам
+    ask_depth     TEXT,   -- сумма qty по top-N аскам
+    levels        INTEGER -- N (сколько уровней в сумме)
+);
+
+CREATE INDEX IF NOT EXISTS ix_book_snapshots_ts ON book_snapshots(ts_ms);
+CREATE INDEX IF NOT EXISTS ix_book_snapshots_symbol_ts ON book_snapshots(symbol, ts_ms);

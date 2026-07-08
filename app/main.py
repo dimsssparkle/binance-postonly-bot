@@ -18,12 +18,13 @@ from app.engine.reconcile import Reconciler
 from app.engine.state_machine import ExecutionEngine
 from app.exchange.fees import CommissionRateCache
 from app.exchange.filters import SymbolFilterCache
+from app.exchange.market_stream import BookDepthRecorder
 from app.exchange.rest import BinanceRestClient
 from app.exchange.ws_userstream import UserDataStream
 from app.persistence.db import close_db, open_db
 from app.persistence.repository import (
-    EventLogRepository, IntentOrderRepository, IntentRepository, ListenKeyRepository,
-    SettingsRepository,
+    BookSnapshotRepository, EventLogRepository, IntentOrderRepository, IntentRepository,
+    ListenKeyRepository, SettingsRepository,
 )
 from app.strategy.noop import NoopStrategy
 from app.strategy.runner import StrategyRunner
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
     events = EventLogRepository(conn)
     listen_keys = ListenKeyRepository(conn)
     settings = SettingsRepository(conn)
+    book_snapshots = BookSnapshotRepository(conn)
 
     saved_tp = await settings.get("tp_pct")
     saved_sl = await settings.get("sl_pct")
@@ -104,10 +106,17 @@ async def lifespan(app: FastAPI):
     await strategy_runner.start()
     app.state.strategy_runner = strategy_runner
 
+    # Фоновая запись стакана (Phase 2.P) — накапливает историю L2 для будущих
+    # depth-стратегий. Не участвует в торговле.
+    book_recorder = BookDepthRecorder(book_snapshots, SYMBOL_DEFAULT)
+    await book_recorder.start()
+    app.state.book_recorder = book_recorder
+
     log.info(f"Startup OK: engine ready for {SYMBOL_DEFAULT}")
     try:
         yield
     finally:
+        await book_recorder.stop()
         await strategy_runner.stop()
         await user_stream.stop()
         await close_db(conn)

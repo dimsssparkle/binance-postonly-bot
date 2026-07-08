@@ -308,8 +308,31 @@ class SettingsRepository:
         )
         await self._conn.commit()
 
-    async def mark_renewed(self) -> None:
+
+class BookSnapshotRepository:
+    """Запись компактных снимков стакана для будущих depth-стратегий."""
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def insert(self, symbol: str, ts_ms: int, best_bid: str, best_bid_qty: str,
+                     best_ask: str, best_ask_qty: str, bid_depth: str, ask_depth: str,
+                     levels: int) -> None:
         await self._conn.execute(
-            "UPDATE listen_key_state SET last_renewed_ms = ? WHERE id = 1", (_now_ms(),)
+            """INSERT INTO book_snapshots
+               (ts_ms, symbol, best_bid, best_bid_qty, best_ask, best_ask_qty,
+                bid_depth, ask_depth, levels)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ts_ms, symbol.upper(), best_bid, best_bid_qty, best_ask, best_ask_qty,
+             bid_depth, ask_depth, levels),
         )
         await self._conn.commit()
+
+    async def count(self, symbol: Optional[str] = None) -> int:
+        if symbol:
+            cur = await self._conn.execute(
+                "SELECT COUNT(*) AS n FROM book_snapshots WHERE symbol = ?", (symbol.upper(),))
+        else:
+            cur = await self._conn.execute("SELECT COUNT(*) AS n FROM book_snapshots")
+        row = await cur.fetchone()
+        return int(row["n"]) if row else 0
