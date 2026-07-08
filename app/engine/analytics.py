@@ -3,35 +3,46 @@ import time
 from decimal import Decimal
 from typing import Optional
 
-from app.engine.models import Intent, IntentOrder, OrderRole
+from app.engine.commission_ledger import IntentAttribution, OrderEvent, allocate_lifecycle_commission
+from app.engine.models import Intent, OrderRole
 from app.persistence.repository import IntentOrderRepository, IntentRepository
 
 
-async def round_trip_commission(intents_repo: IntentRepository, orders_repo: IntentOrderRepository,
-                                 intent: Intent, closing: IntentOrder) -> Decimal:
-    """Суммарная комиссия по всей сделке. Комиссия за вход не всегда лежит
-    в ЭТОМ intent-е: если позиция была закрыта не своим TP/SL, а НОВЫМ
-    сигналом (close_opposite в другом intent-е), комиссия входа осталась
-    в предыдущем intent-е того же символа — доучитываем её отдельно."""
-    total = await orders_repo.sum_all_commission(intent.id)
-    if closing.role == OrderRole.CLOSE_OPPOSITE:
-        prior = await intents_repo.get_previous_for_symbol(intent.symbol, intent.id)
-        if prior is not None:
-            total += await orders_repo.sum_entry_commission(prior.id)
-    return total
+async def intent_net_realized_pnl_batch(orders_repo: IntentOrderRepository, symbol: str,
+                                         up_to_intent_id: int) -> dict[int, IntentAttribution]:
+    """Честное распределение комиссии/PnL по всем intent-ам символа (вплоть
+    до up_to_intent_id), что закрывали позицию частично или полностью —
+    один проход по истории вместо запроса на каждый intent (см.
+    commission_ledger.allocate_lifecycle_commission)."""
+    rows = await orders_repo.list_filled_for_symbol(symbol, up_to_intent_id)
+    events = [
+        OrderEvent(
+            intent_id=r.intent_id,
+            kind="entry" if r.role in (OrderRole.ENTRY_MAKER, OrderRole.ENTRY_MARKET) else "close",
+            qty=Decimal(r.filled_qty or "0"),
+            commission=Decimal(r.commission or "0"),
+            realized_pnl=Decimal(r.realized_pnl or "0"),
+        )
+        for r in rows
+    ]
+    return allocate_lifecycle_commission(events)
 
 
-async def intent_net_realized_pnl(intents_repo: IntentRepository, orders_repo: IntentOrderRepository,
-                                   intent: Intent) -> Optional[Decimal]:
-    """Реализованный чистый PnL закрытого intent-а (realizedPnl биржи минус
-    ВСЕ уплаченные комиссии, включая комиссию входа из предыдущего intent-а,
-    если закрытие произошло через close_opposite). None, если позиция по
-    этому intent-у ни разу не закрывалась реальным трейдом."""
-    closing = await orders_repo.get_closing_fill(intent.id)
-    if closing is None:
+async def intent_net_realized_pnl(orders_repo: IntentOrderRepository, intent: Intent) -> Optional[Decimal]:
+    """Реализованный чистый PnL ЭТОГО intent-а (сумма realizedPnl биржи по
+    всем его closing-филлам минус честно распределённая round-trip комиссия,
+    включая долю входа из intent-ов-добавлений, что были раньше в цепочке).
+    None, если этот intent ни разу не закрывал позицию реальным трейдом.
+
+    Для расчёта по многим intent-ам подряд (дашборд, дневной PnL) вызывайте
+    intent_net_realized_pnl_batch один раз и берите значения из словаря —
+    эта функция сама под капотом делает ровно такой батч-запрос, так что
+    вызывать её в цикле по нескольким intent-ам того же символа неэффективно."""
+    attrs = await intent_net_realized_pnl_batch(orders_repo, intent.symbol, intent.id)
+    a = attrs.get(intent.id)
+    if a is None or not a.has_close:
         return None
-    total_commission = await round_trip_commission(intents_repo, orders_repo, intent, closing)
-    return Decimal(closing.realized_pnl or "0") - total_commission
+    return a.realized_pnl - a.attributed_commission
 
 
 def start_of_day_ms(now_ms: Optional[int] = None) -> int:
@@ -42,18 +53,20 @@ def start_of_day_ms(now_ms: Optional[int] = None) -> int:
 async def daily_net_pnl(intents_repo: IntentRepository, orders_repo: IntentOrderRepository,
                          symbol: str, limit: int = 500) -> Decimal:
     """Сумма чистого реализованного PnL по всем intent-ам этого символа,
-    закрытым сегодня (граница дня — UTC, по времени сервера)."""
+    обновлённым сегодня (граница дня — UTC, по времени сервера). Не
+    фильтруем по state == flat/failed — у intent-а-переворота (state==open,
+    новая сторона всё ещё открыта) уже реализован реальный PnL по закрытой
+    старой стороне, и он должен попасть в дневную сумму; фильтр по
+    has_close (через intent_net_realized_pnl_batch) корректно это учитывает."""
     since = start_of_day_ms()
-    total = Decimal("0")
     rows = await intents_repo.list_recent(limit)
-    for intent in rows:
-        if intent.symbol.upper() != symbol.upper():
-            continue
-        if intent.updated_at_ms < since:
-            continue
-        if intent.state.value not in ("flat", "failed"):
-            continue
-        pnl = await intent_net_realized_pnl(intents_repo, orders_repo, intent)
-        if pnl is not None:
-            total += pnl
+    todays = [i for i in rows if i.symbol.upper() == symbol.upper() and i.updated_at_ms >= since]
+    if not todays:
+        return Decimal("0")
+    attrs = await intent_net_realized_pnl_batch(orders_repo, symbol, max(i.id for i in todays))
+    total = Decimal("0")
+    for intent in todays:
+        a = attrs.get(intent.id)
+        if a is not None and a.has_close:
+            total += a.realized_pnl - a.attributed_commission
     return total

@@ -21,6 +21,7 @@ from app.exchange.filters import SymbolFilterCache
 from app.exchange.leverage_brackets import LeverageBracketCache
 from app.exchange.market_stream import BookDepthRecorder
 from app.exchange.rest import BinanceRestClient
+from app.exchange.trade_ticks import TradeTickRecorder
 from app.exchange.ws_userstream import UserDataStream
 from app.persistence.db import close_db, open_db
 from app.persistence.repository import (
@@ -70,6 +71,11 @@ async def lifespan(app: FastAPI):
     book_recorder = BookDepthRecorder(book_snapshots, SYMBOL_DEFAULT)
     await book_recorder.start()
     app.state.book_recorder = book_recorder
+
+    # Живая цена последней сделки — для тик-обновлений графика на дашборде.
+    tick_recorder = TradeTickRecorder(SYMBOL_DEFAULT)
+    await tick_recorder.start()
+    app.state.tick_recorder = tick_recorder
 
     saved_leverage = await settings.get("leverage")
     saved_qty = await settings.get("qty_default")
@@ -126,6 +132,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await tick_recorder.stop()
         await book_recorder.stop()
         await strategy_runner.stop()
         await user_stream.stop()

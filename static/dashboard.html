@@ -111,6 +111,9 @@
   .event-kind { font-family: var(--mono); }
 
   .empty { color: var(--ink-faint); font-size: 13px; padding: 8px 0; }
+
+  .chart-wrap { position: relative; width: 100%; height: 220px; }
+  .chart-wrap canvas { width: 100%; height: 100%; display: block; }
 </style>
 </head>
 <body>
@@ -118,6 +121,7 @@
   <header>
     <h1>Binance Bot v2 <span class="pill" id="symPill">—</span> <span class="pill" id="levPill">x—</span></h1>
     <div style="display:flex;align-items:center;gap:12px">
+      <span class="pill" id="balancePill">Баланс: —</span>
       <span class="pill" id="dailyPnlPill">День: —</span>
       <span class="conn" id="bookStatus" title="Фоновая запись стакана"><span class="dot"></span><span id="bookLabel">стакан: —</span></span>
       <span class="conn" id="connStatus"><span class="dot"></span><span id="connLabel">connecting…</span></span>
@@ -144,6 +148,7 @@
     <div class="card">
       <h2>Торговля <span style="text-transform:none;font-weight:400">(реальный счёт; плечо — сразу на бирже, qty/TP/SL — для будущих сделок)</span></h2>
       <div class="actions">
+        <div class="qty-row">Bid/Ask: <span class="cell-sub" id="tradeBidAsk">—</span></div>
         <div class="qty-row">Плечо: <input type="number" id="leverageInput" step="1" min="1" max="125" placeholder="—"/></div>
         <div class="qty-row">
           Qty: <input type="number" id="qtyInput" step="0.001" min="0.001" placeholder="—"/>
@@ -168,6 +173,11 @@
         <div class="action-msg" id="actionMsg"></div>
       </div>
     </div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px">
+    <h2>График <span style="text-transform:none;font-weight:400" id="chartTf">15m</span></h2>
+    <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
   </div>
 
   <div class="card" style="margin-bottom:14px">
@@ -227,9 +237,14 @@ function renderPosition(p) {
   document.getElementById('posNotional').textContent = fmtNum(pos.notional, 2);
   document.getElementById('posLiq').textContent = fmtNum(pos.liquidationPrice, 2);
   const book = p.book || {};
-  document.getElementById('posBook').textContent = (book.bidPrice || "—") + " / " + (book.askPrice || "—");
+  const bidAskStr = (book.bidPrice || "—") + " / " + (book.askPrice || "—");
+  document.getElementById('posBook').textContent = bidAskStr;
+  document.getElementById('tradeBidAsk').textContent = bidAskStr;
   lastBook = book;
   updateTpSlPreview();
+
+  const balance = p.balance || {};
+  document.getElementById('balancePill').textContent = 'Баланс: ' + fmtNum(balance.walletBalance, 2);
 }
 
 const ENTRY_METHOD_LABEL = { maker: 'мейкер', market: 'маркет', mixed: 'мейкер+маркет' };
@@ -471,6 +486,99 @@ function connect() {
   };
 }
 connect();
+
+// --- График свечей + живые тики (обновление формирующейся свечи) ---
+const chartCanvas = document.getElementById('priceChart');
+const chartCtx = chartCanvas.getContext('2d');
+let candles = [];
+
+function resizeCanvas() {
+  const wrap = chartCanvas.parentElement;
+  const dpr = window.devicePixelRatio || 1;
+  chartCanvas.width = wrap.clientWidth * dpr;
+  chartCanvas.height = wrap.clientHeight * dpr;
+}
+
+function drawChart() {
+  if (!candles.length) return;
+  resizeCanvas();
+  const dpr = window.devicePixelRatio || 1;
+  const w = chartCanvas.width, h = chartCanvas.height;
+  chartCtx.clearRect(0, 0, w, h);
+
+  const styles = getComputedStyle(document.documentElement);
+  const doneColor = styles.getPropertyValue('--done').trim();
+  const failedColor = styles.getPropertyValue('--failed').trim();
+  const ruleColor = styles.getPropertyValue('--rule').trim();
+  const faintColor = styles.getPropertyValue('--ink-faint').trim();
+
+  const highs = candles.map(c => c[2]), lows = candles.map(c => c[3]);
+  const maxP = Math.max(...highs), minP = Math.min(...lows);
+  const pad = (maxP - minP) * 0.08 || 1;
+  const top = maxP + pad, bottom = minP - pad;
+  const priceToY = p => h - ((p - bottom) / (top - bottom)) * h;
+
+  const n = candles.length;
+  const slot = w / n;
+  const bodyW = Math.max(dpr, slot * 0.6);
+
+  chartCtx.strokeStyle = ruleColor;
+  chartCtx.lineWidth = dpr;
+  for (let i = 0; i <= 4; i++) {
+    const y = (h / 4) * i;
+    chartCtx.beginPath(); chartCtx.moveTo(0, y); chartCtx.lineTo(w, y); chartCtx.stroke();
+  }
+
+  candles.forEach((c, i) => {
+    const [, o, hi, lo, cl] = c;
+    const x = i * slot + slot / 2;
+    const up = cl >= o;
+    const color = up ? doneColor : failedColor;
+    chartCtx.strokeStyle = color;
+    chartCtx.fillStyle = color;
+    chartCtx.lineWidth = dpr;
+    chartCtx.beginPath();
+    chartCtx.moveTo(x, priceToY(hi));
+    chartCtx.lineTo(x, priceToY(lo));
+    chartCtx.stroke();
+    const yO = priceToY(o), yC = priceToY(cl);
+    const bodyTop = Math.min(yO, yC), bodyH = Math.max(dpr, Math.abs(yC - yO));
+    chartCtx.fillRect(x - bodyW / 2, bodyTop, bodyW, bodyH);
+  });
+
+  const last = candles[candles.length - 1];
+  chartCtx.fillStyle = faintColor;
+  chartCtx.font = `${11 * dpr}px -apple-system, sans-serif`;
+  chartCtx.textAlign = 'right';
+  chartCtx.fillText(fmtNum(last[4], 2), w - 4 * dpr, 14 * dpr);
+}
+
+async function loadCandles() {
+  try {
+    const r = await fetch(`/candles?symbol=${encodeURIComponent(sym)}&tf=15m&limit=100`);
+    const j = await r.json();
+    if (j.candles && j.candles.length) { candles = j.candles; drawChart(); }
+  } catch (e) { /* держим последние известные свечи */ }
+}
+loadCandles();
+setInterval(loadCandles, 60000);
+window.addEventListener('resize', drawChart);
+
+function connectPriceStream() {
+  const priceEs = new EventSource('/price/stream');
+  priceEs.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (!candles.length || data.price == null) return;
+      const last = candles[candles.length - 1];
+      last[4] = data.price;
+      if (data.price > last[2]) last[2] = data.price;
+      if (data.price < last[3]) last[3] = data.price;
+      drawChart();
+    } catch (e) { /* игнор битого кадра */ }
+  };
+}
+connectPriceStream();
 </script>
 </body>
 </html>

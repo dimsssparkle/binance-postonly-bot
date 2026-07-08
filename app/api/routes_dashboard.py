@@ -9,7 +9,8 @@ from typing import Any, Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.engine.analytics import daily_net_pnl, round_trip_commission, start_of_day_ms
+from app.engine.analytics import daily_net_pnl, intent_net_realized_pnl_batch, start_of_day_ms
+from app.engine.commission_ledger import IntentAttribution
 from app.engine.models import Intent, OrderRole, OrderStatus
 
 log = logging.getLogger("api.dashboard")
@@ -36,19 +37,30 @@ def _entry_method(orders: list) -> Optional[str]:
     return None
 
 
-async def _intent_to_dict(request: Request, intent: Intent) -> dict:
+async def _intent_to_dict(request: Request, intent: Intent,
+                           attribution: Optional[IntentAttribution]) -> dict:
+    """attribution — из intent_net_realized_pnl_batch, посчитан ОДИН раз на
+    все intent-ы символа вызывающим кодом (не самим этой функцией) — честно
+    распределяет комиссию входа по цепочке добавлений/сокращений, а не
+    только по этому intent-у (см. app/engine/commission_ledger.py)."""
     engine = request.app.state.engine
     orders = await engine.orders.list_for_intent(intent.id)
-    closing = await engine.orders.get_closing_fill(intent.id)
-    if closing is not None:
-        total_commission = await round_trip_commission(engine.intents, engine.orders, intent, closing)
-        net_realized_pnl = Decimal(closing.realized_pnl or "0") - total_commission
-    else:
-        total_commission = await engine.orders.sum_all_commission(intent.id)
-        net_realized_pnl = None
 
-    entry_commission = sum((Decimal(o.commission or "0") for o in orders if o.role in _ENTRY_ROLES), Decimal("0"))
-    exit_commission = sum((Decimal(o.commission or "0") for o in orders if o.role in _EXIT_ROLES), Decimal("0"))
+    close_orders = [o for o in orders if o.role in _EXIT_ROLES and o.status == OrderStatus.FILLED]
+    last_close = max(close_orders, key=lambda o: o.id or 0) if close_orders else None
+
+    if attribution is not None and attribution.has_close:
+        exit_commission = sum((Decimal(o.commission or "0") for o in close_orders), Decimal("0"))
+        total_commission = attribution.attributed_commission
+        # Разница — честно распределённая доля комиссии входа (может быть с
+        # предков-добавлений, не только с ордеров ЭТОГО intent-а).
+        entry_commission = total_commission - exit_commission
+        net_realized_pnl = attribution.realized_pnl - attribution.attributed_commission
+    else:
+        entry_commission = sum((Decimal(o.commission or "0") for o in orders if o.role in _ENTRY_ROLES), Decimal("0"))
+        exit_commission = Decimal("0")
+        total_commission = entry_commission
+        net_realized_pnl = None
 
     return {
         "id": intent.id,
@@ -59,11 +71,11 @@ async def _intent_to_dict(request: Request, intent: Intent) -> dict:
         "attempt_no": intent.attempt_no,
         "entry_price": intent.entry_price,
         "entry_method": _entry_method(orders),
-        "close_price": closing.filled_price if closing else None,
+        "close_price": last_close.filled_price if last_close else None,
         # TP/SL — market-type algo ордера, close_opposite (нетинг-сокращение)
         # тоже всегда market (см. _reduce_position) — выход всегда taker;
         # exit_method здесь про МЕХАНИЗМ закрытия, не про maker/taker.
-        "exit_method": closing.role.value if closing else None,
+        "exit_method": last_close.role.value if last_close else None,
         "net_realized_pnl": str(net_realized_pnl) if net_realized_pnl is not None else None,
         "total_commission": str(total_commission),
         "entry_commission": str(entry_commission),
@@ -72,6 +84,22 @@ async def _intent_to_dict(request: Request, intent: Intent) -> dict:
         "created_at_ms": intent.created_at_ms,
         "updated_at_ms": intent.updated_at_ms,
     }
+
+
+async def _intents_to_dicts(request: Request, rows: list[Intent]) -> list[dict]:
+    """Считает распределение комиссии ОДИН раз на символ (а не на каждый
+    intent по отдельности) для всех intent-ов, которые нужно отобразить."""
+    engine = request.app.state.engine
+    by_symbol: dict[str, list[Intent]] = {}
+    for i in rows:
+        by_symbol.setdefault(i.symbol.upper(), []).append(i)
+    attrs_by_symbol: dict[str, dict[int, IntentAttribution]] = {}
+    for sym, group in by_symbol.items():
+        attrs_by_symbol[sym] = await intent_net_realized_pnl_batch(engine.orders, sym, max(i.id for i in group))
+    return [
+        await _intent_to_dict(request, i, attrs_by_symbol[i.symbol.upper()].get(i.id))
+        for i in rows
+    ]
 
 
 async def _net_unrealized_pnl(request: Request, sym: str, gross_pnl: float,
@@ -141,7 +169,14 @@ async def _position_snapshot(request: Request, symbol: str) -> dict[str, Any]:
     except Exception as e:
         log.warning(f"[DASHBOARD] book_ticker failed: {e}")
 
-    return {"symbol": sym, "position": position, "book": book, "ts": int(time.time() * 1000)}
+    balance: dict[str, Any] = {}
+    try:
+        balance = rest.get_account_balance()
+    except Exception as e:
+        log.warning(f"[DASHBOARD] account_balance failed: {e}")
+
+    return {"symbol": sym, "position": position, "book": book, "balance": balance,
+            "ts": int(time.time() * 1000)}
 
 
 async def _book_recorder_status(request: Request, symbol: str) -> dict[str, Any]:
@@ -174,11 +209,25 @@ async def orders_open(request: Request, symbol: Optional[str] = None):
     return await _position_snapshot(request, sym)
 
 
+@router.get("/candles")
+def candles(request: Request, symbol: Optional[str] = None, tf: str = "15m", limit: int = 200):
+    engine = request.app.state.engine
+    sym = (symbol or engine.symbol).upper()
+    rest = request.app.state.rest
+    try:
+        raw = rest.get_klines(sym, tf, limit=limit)
+    except Exception as e:
+        log.warning(f"[DASHBOARD] klines failed: {e}")
+        return {"candles": []}
+    # [openTime, open, high, low, close, volume, closeTime, ...] -> компактно
+    return {"candles": [[k[0], float(k[1]), float(k[2]), float(k[3]), float(k[4])] for k in raw]}
+
+
 @router.get("/intents")
 async def list_intents(request: Request, limit: int = 30):
     engine = request.app.state.engine
     rows = await engine.intents.list_recent(limit)
-    return {"intents": [await _intent_to_dict(request, i) for i in rows]}
+    return {"intents": await _intents_to_dicts(request, rows)}
 
 
 @router.get("/pnl/daily")
@@ -213,7 +262,7 @@ async def _dashboard_sse_gen(request: Request, symbol: str, interval_ms: int):
             intents_rows = await engine.intents.list_recent(10)
             payload = {
                 "position": await _position_snapshot(request, symbol),
-                "intents": [await _intent_to_dict(request, i) for i in intents_rows],
+                "intents": await _intents_to_dicts(request, intents_rows),
                 "events": await engine.events.tail(15),
                 "netPnlToday": str(await daily_net_pnl(engine.intents, engine.orders, symbol)),
                 "bookRecorder": await _book_recorder_status(request, symbol),
@@ -230,3 +279,23 @@ async def orders_stream(request: Request, symbol: Optional[str] = None, interval
     engine = request.app.state.engine
     sym = (symbol or engine.symbol).upper()
     return StreamingResponse(_dashboard_sse_gen(request, sym, interval_ms), media_type="text/event-stream")
+
+
+async def _price_sse_gen(request: Request):
+    """Отдельный от _dashboard_sse_gen быстрый поток — только цена последней
+    сделки из уже живущего в памяти кэша TradeTickRecorder, без единого
+    REST/DB-вызова, поэтому можно тикать намного чаще, не нагружая ничего."""
+    while True:
+        if await request.is_disconnected():
+            break
+        recorder = getattr(request.app.state, "tick_recorder", None)
+        last = recorder.get_last_price() if recorder else None
+        if last is not None:
+            price, ts_ms = last
+            yield f"data: {json.dumps({'price': price, 'ts': ts_ms})}\n\n"
+        await asyncio.sleep(0.3)
+
+
+@router.get("/price/stream")
+async def price_stream(request: Request):
+    return StreamingResponse(_price_sse_gen(request), media_type="text/event-stream")

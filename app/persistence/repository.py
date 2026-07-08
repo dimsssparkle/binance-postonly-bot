@@ -79,18 +79,6 @@ class IntentRepository:
         row = await cur.fetchone()
         return _row_to_intent(row) if row else None
 
-    async def get_previous_for_symbol(self, symbol: str, before_id: int) -> Optional[Intent]:
-        """Intent, непосредственно предшествовавший этому по тому же символу —
-        нужен, когда позиция закрылась НОВЫМ intent-ом (close_opposite), а не
-        TP/SL внутри того же intent-а, что её открыл: комиссия входа осталась
-        там, у предыдущего."""
-        cur = await self._conn.execute(
-            "SELECT * FROM intents WHERE symbol = ? AND id < ? ORDER BY id DESC LIMIT 1",
-            (symbol.upper(), before_id),
-        )
-        row = await cur.fetchone()
-        return _row_to_intent(row) if row else None
-
     async def list_active_all(self) -> list[Intent]:
         cur = await self._conn.execute(
             "SELECT * FROM intents WHERE state NOT IN ('flat', 'failed') ORDER BY id"
@@ -224,23 +212,24 @@ class IntentOrderRepository:
                 total += Decimal(r.commission or "0")
         return total
 
-    async def sum_all_commission(self, intent_id: int) -> Decimal:
-        """Сумма комиссий по ВСЕМ ордерам intent-а (вход + выход)."""
-        rows = await self.list_for_intent(intent_id)
-        return sum((Decimal(r.commission or "0") for r in rows), Decimal("0"))
-
-    async def get_closing_fill(self, intent_id: int) -> Optional[IntentOrder]:
-        """Ордер, который фактически закрыл позицию (TP/SL сработал на бирже,
-        либо ручное/встречное закрытие) — последний FILLED с такой ролью."""
-        rows = await self.list_for_intent(intent_id)
-        closing = [
-            r for r in rows
-            if r.role in (OrderRole.TP, OrderRole.SL, OrderRole.CLOSE_OPPOSITE)
-            and r.status == OrderStatus.FILLED
-        ]
-        if not closing:
-            return None
-        return max(closing, key=lambda r: r.id or 0)
+    async def list_filled_for_symbol(self, symbol: str, up_to_intent_id: int) -> list[IntentOrder]:
+        """Все FILLED entry/close-ордера по символу, по всем intent-ам, в
+        порядке id — хронологически, т.к. intent-ы одного символа создаются
+        строго по возрастанию id, а ордера внутри intent-а — в порядке вызова.
+        Используется commission_ledger.allocate_lifecycle_commission для
+        честного распределения комиссии входа по цепочке добавлений/
+        сокращений (см. app/engine/analytics.py)."""
+        cur = await self._conn.execute(
+            """SELECT io.* FROM intent_orders io
+               JOIN intents i ON i.id = io.intent_id
+               WHERE i.symbol = ? AND io.intent_id <= ?
+                 AND io.status = 'filled'
+                 AND io.role IN ('entry_maker','entry_market','close_opposite','tp','sl')
+               ORDER BY io.id""",
+            (symbol.upper(), up_to_intent_id),
+        )
+        rows = await cur.fetchall()
+        return [_row_to_intent_order(r) for r in rows]
 
 
 class EventLogRepository:

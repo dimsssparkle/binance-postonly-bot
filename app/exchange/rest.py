@@ -129,6 +129,22 @@ class BinanceRestClient:
                 return int(p["leverage"])
         return None
 
+    def get_account_balance(self) -> Dict[str, str]:
+        """Фьючерсный баланс аккаунта (USDT): кошелёк / доступно / с учётом
+        маржи открытых позиций."""
+        acc = self.client.sign_request("GET", "/fapi/v2/account", {})
+        return {
+            "walletBalance": acc.get("totalWalletBalance", "0"),
+            "availableBalance": acc.get("availableBalance", "0"),
+            "marginBalance": acc.get("totalMarginBalance", "0"),
+        }
+
+    def get_klines(self, symbol: str, interval: str, limit: int = 200) -> list:
+        """Последние `limit` свечей — для превью-графика на дашборде (не
+        путать с app/backtest/data.py::fetch_klines, та — для бэктеста, с
+        постраничной подгрузкой и дисковым кэшем на годы истории)."""
+        return self.client.klines(symbol=symbol.upper(), interval=interval, limit=limit)
+
     # --- User Data Stream (listenKey) ---
     def new_listen_key(self) -> str:
         resp = self.client.new_listen_key()
