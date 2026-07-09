@@ -65,11 +65,22 @@ class TradeTickRecorder:
     def _parse(self, raw: str) -> None:
         try:
             m = json.loads(raw)
+            if m.get("e") != "trade":
+                return
             price = m.get("p")
             ts_ms = m.get("T") or m.get("E")
             if price is None or ts_ms is None:
                 return
-            self.last_price = float(price)
+            price_f = float(price)
+            # Поток периодически (раз в 10-20с) шлёт синтетические trade-события
+            # с p="0", q="0", X="NA" — не настоящие сделки (подтверждено вживую:
+            # sniff сырого потока на проде поймал ~10 таких за 60с). Настоящая
+            # цена сделки на бирже никогда не 0 — без этого фильтра такой тик
+            # перманентно портил low форминг-свечи на дашборде (0 < любого
+            # реального минимума истинно, и назад уже не подтянуть).
+            if price_f <= 0:
+                return
+            self.last_price = price_f
             self.last_trade_ms = int(ts_ms)
         except Exception:
             pass

@@ -569,7 +569,7 @@ function connectPriceStream() {
   priceEs.onmessage = (ev) => {
     try {
       const data = JSON.parse(ev.data);
-      if (!candles.length || data.price == null) return;
+      if (!candles.length || data.price == null || !(data.price > 0)) return;
       const last = candles[candles.length - 1];
       last[4] = data.price;
       if (data.price > last[2]) last[2] = data.price;
