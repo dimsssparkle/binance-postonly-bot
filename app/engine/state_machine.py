@@ -69,31 +69,41 @@ class ExecutionEngine:
         self.leverage = leverage
         self.commission_rates = commission_rates or CommissionRateCache(rest)
         self.book_recorder = book_recorder
+        # Сериализует handle_signal целиком (busy-check + create + _run_intent)
+        # для символа: без этого два почти одновременных сигнала (например,
+        # ручной клик на дашборде вперемешку с сигналом стратегии) могли бы
+        # оба пройти busy-check до того, как любой из них создаст свой Intent,
+        # и создать два параллельных Intent-а для одного символа — ломая
+        # инвариант "один линейный intent-chain на символ", на который
+        # опирается netting.py и учёт комиссий. Один Lock, а не per-symbol
+        # словарь: бот сейчас торгует ровно одним символом (self.symbol).
+        self._signal_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     # Entry point
     # ------------------------------------------------------------------ #
     async def handle_signal(self, side: Side, qty: Optional[str] = None) -> Intent:
-        active = await self.intents.get_active(self.symbol)
-        if active is not None:
-            if active.state != IntentState.OPEN:
-                raise EngineBusyError(
-                    f"intent #{active.id} already active for {self.symbol} in state {active.state.value}"
-                )
-            # OPEN is a steady state, not "in-flight" — a new signal (including
-            # a close/FLAT signal) supersedes it. Mark it resolved so the new
-            # intent doesn't collide with the one-active-intent-per-symbol index;
-            # the new intent's own _cancel_exits/_reduce_position steps handle
-            # the actual exchange-side cleanup of the position it's superseding.
-            await self.intents.update_state(active.id, IntentState.FLAT)
+        async with self._signal_lock:
+            active = await self.intents.get_active(self.symbol)
+            if active is not None:
+                if active.state != IntentState.OPEN:
+                    raise EngineBusyError(
+                        f"intent #{active.id} already active for {self.symbol} in state {active.state.value}"
+                    )
+                # OPEN is a steady state, not "in-flight" — a new signal (including
+                # a close/FLAT signal) supersedes it. Mark it resolved so the new
+                # intent doesn't collide with the one-active-intent-per-symbol index;
+                # the new intent's own _cancel_exits/_reduce_position steps handle
+                # the actual exchange-side cleanup of the position it's superseding.
+                await self.intents.update_state(active.id, IntentState.FLAT)
 
-        qty_val = qty or self.qty_default
-        intent = await self.intents.create(self.symbol, side, qty_val)
-        await self.events.append("engine", "intent_created",
-                                  {"symbol": self.symbol, "side": side.value, "qty": qty_val},
-                                  intent_id=intent.id)
-        await self._run_intent(intent.id)
-        return await self.intents.get(intent.id)
+            qty_val = qty or self.qty_default
+            intent = await self.intents.create(self.symbol, side, qty_val)
+            await self.events.append("engine", "intent_created",
+                                      {"symbol": self.symbol, "side": side.value, "qty": qty_val},
+                                      intent_id=intent.id)
+            await self._run_intent(intent.id)
+            return await self.intents.get(intent.id)
 
     # ------------------------------------------------------------------ #
     # Main state machine driver
