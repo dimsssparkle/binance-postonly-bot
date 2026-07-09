@@ -7,11 +7,13 @@ NoopStrategy (боевой дефолт до готовности реально
 """
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Optional
 
 from app.strategy.base import Strategy
 from app.strategy.mean_reversion import MeanReversionStrategy
 from app.strategy.momentum import MomentumStrategy
 from app.strategy.params import ParamSpec, ParamType, validate_params
+from app.strategy.regime_router import RegimeRouterStrategy
 
 # Тот же список таймфреймов, что backtest/data.py::_TF_MINUTES поддерживает.
 TF_CHOICES = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"]
@@ -45,12 +47,48 @@ STRATEGY_REGISTRY: dict[str, StrategyMeta] = {
             ParamSpec("tf", ParamType.ENUM, "15m", "Таймфрейм", choices=TF_CHOICES),
         ],
     ),
+    "regime_router": StrategyMeta(
+        key="regime_router", label="Regime Router (ADX: тренд/флэт)", cls=RegimeRouterStrategy,
+        params=[
+            ParamSpec("adx_period", ParamType.INT, 14, "Период ADX", min=2, max=100),
+            ParamSpec("adx_threshold", ParamType.FLOAT, 25.0, "Порог ADX (тренд, если выше)", min=1, max=100),
+            ParamSpec("tf", ParamType.ENUM, "15m", "Таймфрейм (классификация и кандидаты)", choices=TF_CHOICES),
+            ParamSpec("trending_config_id", ParamType.STRATEGY_REF, 0, "Кандидат: тренд"),
+            ParamSpec("ranging_config_id", ParamType.STRATEGY_REF, 0, "Кандидат: флэт"),
+        ],
+    ),
+}
+
+# STRATEGY_REF-параметры не совпадают по имени с kwarg конструктора
+# (trending_config_id — это ссылка на другую strategy_configs-запись, а
+# конструктору RegimeRouterStrategy нужен уже готовый объект Strategy под
+# именем trending_strategy) — явная карта переименования на разрешении.
+_STRATEGY_REF_KWARG_MAP: dict[str, dict[str, str]] = {
+    "regime_router": {"trending_config_id": "trending_strategy", "ranging_config_id": "ranging_strategy"},
 }
 
 
-def build_strategy(strategy_key: str, params: dict) -> Strategy:
+def build_strategy(strategy_key: str, params: dict,
+                    sub_strategies: Optional[dict[str, Strategy]] = None) -> Strategy:
+    """sub_strategies: для STRATEGY_REF-параметров — уже РАЗРЕШЁННЫЕ (не id,
+    а готовые построенные) Strategy-инстансы, keyed по имени ParamSpec (не по
+    имени kwarg — переименование см. _STRATEGY_REF_KWARG_MAP). Разрешение
+    id->Strategy требует доступа к репозиторию, которого у этой чистой
+    функции нет — это ответственность вызывающего (routes_strategies.py)."""
     meta = STRATEGY_REGISTRY.get(strategy_key)
     if meta is None:
         raise ValueError(f"неизвестная стратегия: {strategy_key!r}")
     clean = validate_params(meta.params, params)
+
+    ref_names = [p.name for p in meta.params if p.type == ParamType.STRATEGY_REF]
+    if ref_names:
+        if sub_strategies is None:
+            raise ValueError(f"{strategy_key}: нужны разрешённые sub_strategies для {ref_names}")
+        kwarg_map = _STRATEGY_REF_KWARG_MAP.get(strategy_key, {})
+        for name in ref_names:
+            clean.pop(name)
+            if name not in sub_strategies:
+                raise ValueError(f"{strategy_key}: отсутствует sub_strategies[{name!r}]")
+            clean[kwarg_map.get(name, name)] = sub_strategies[name]
+
     return meta.cls(**clean)

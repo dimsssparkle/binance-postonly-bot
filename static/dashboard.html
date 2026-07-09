@@ -699,6 +699,18 @@ function renderParamForm(meta, currentParams) {
         `<option value="${c}" ${c === val ? 'selected' : ''}>${c}</option>`).join('');
       return `<div class="qty-row">${p.label}: <select id="${id}">${opts}</select></div>`;
     }
+    if (p.type === 'strategy_ref') {
+      // Кандидаты — сохранённые strategy_configs, кроме самих regime_router
+      // (без вложенных роутеров, зеркалит серверную защиту от циклов).
+      const candidates = strategyConfigs.filter(c => c.strategy_key !== 'regime_router');
+      if (!candidates.length) {
+        return `<div class="qty-row">${p.label}: <span class="cell-sub">сначала создайте momentum/mean_reversion конфигурацию</span></div>`;
+      }
+      const opts = candidates.map(c =>
+        `<option value="${c.id}" ${c.id === val ? 'selected' : ''}>${c.name} (${(strategyTypes[c.strategy_key] || {}).label || c.strategy_key})</option>`
+      ).join('');
+      return `<div class="qty-row">${p.label}: <select id="${id}">${opts}</select></div>`;
+    }
     const step = p.type === 'int' ? '1' : '0.001';
     const minAttr = p.min != null ? `min="${p.min}"` : '';
     const maxAttr = p.max != null ? `max="${p.max}"` : '';
@@ -710,9 +722,10 @@ function readParamForm(meta) {
   const out = {};
   meta.params.forEach(p => {
     const el = document.getElementById('sp_' + p.name);
+    if (!el) throw new Error(`${p.label}: нет доступных кандидатов — сначала создайте momentum/mean_reversion конфигурацию`);
     if (p.type === 'bool') out[p.name] = el.checked;
     else if (p.type === 'enum') out[p.name] = el.value;
-    else if (p.type === 'int') out[p.name] = parseInt(el.value, 10);
+    else if (p.type === 'int' || p.type === 'strategy_ref') out[p.name] = parseInt(el.value, 10);
     else out[p.name] = parseFloat(el.value);
   });
   return out;

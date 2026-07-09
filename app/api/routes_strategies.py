@@ -17,8 +17,9 @@ from app.api.schemas import (
 from app.backtest.data import get_history
 from app.backtest.engine import BacktestConfig, BacktestEngine
 from app.backtest.report import build_report
-from app.strategy.params import validate_params
-from app.strategy.registry import STRATEGY_REGISTRY, build_strategy
+from app.strategy.base import Strategy
+from app.strategy.params import ParamType, validate_params
+from app.strategy.registry import STRATEGY_REGISTRY, StrategyMeta, build_strategy
 
 log = logging.getLogger("api.strategies")
 router = APIRouter()
@@ -28,6 +29,35 @@ def _param_spec_to_dict(spec) -> dict[str, Any]:
     d = asdict(spec)
     d["type"] = spec.type.value
     return d
+
+
+async def _resolve_sub_strategies(repo, meta: StrategyMeta, params: dict) -> dict[str, Strategy]:
+    """Для STRATEGY_REF-параметров meta: разрешает id -> реальный построенный
+    Strategy (существование конфигурации, отсутствие вложенных roter'ов,
+    совпадение tf с родителем — иначе кандидат с другим tf будет молча
+    получать пустое окно свечей от market.candles(tf,...) и навсегда
+    отвечать HOLD/warmup, см. Phase B план)."""
+    ref_specs = [p for p in meta.params if p.type == ParamType.STRATEGY_REF]
+    if not ref_specs:
+        return {}
+    router_tf = params.get("tf")
+    resolved: dict[str, Strategy] = {}
+    for spec in ref_specs:
+        config_id = params.get(spec.name) or 0
+        if not config_id:
+            raise ValueError(f"{spec.label}: не выбран кандидат")
+        sub_config = await repo.get(config_id)
+        if sub_config is None:
+            raise ValueError(f"{spec.label}: конфигурация #{config_id} не найдена")
+        if sub_config["strategy_key"] == "regime_router":
+            raise ValueError(f"{spec.label}: вложенные regime_router не поддерживаются")
+        sub_tf = sub_config["params"].get("tf")
+        if sub_tf is not None and router_tf is not None and sub_tf != router_tf:
+            raise ValueError(
+                f"{spec.label}: таймфрейм кандидата ({sub_tf}) не совпадает с "
+                f"таймфреймом роутера ({router_tf})")
+        resolved[spec.name] = build_strategy(sub_config["strategy_key"], sub_config["params"])
+    return resolved
 
 
 @router.get("/strategies/types")
@@ -54,6 +84,10 @@ async def create_strategy_config(payload: StrategyConfigCreatePayload, request: 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     repo = request.app.state.strategy_configs
+    try:
+        await _resolve_sub_strategies(repo, meta, clean)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     config = await repo.create(payload.strategy_key, payload.name, clean)
     return {"config": config}
 
@@ -67,6 +101,10 @@ async def update_strategy_config(config_id: int, payload: StrategyConfigUpdatePa
     meta = STRATEGY_REGISTRY[existing["strategy_key"]]
     try:
         clean = validate_params(meta.params, payload.params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        await _resolve_sub_strategies(repo, meta, clean)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await repo.update_params(config_id, payload.name, clean)
@@ -90,14 +128,17 @@ async def delete_strategy_config(config_id: int, request: Request):
     return {"status": "ok"}
 
 
-def _run_backtest_sync(rest, strategy_key: str, params: dict, payload: BacktestRunPayload) -> dict:
+def _run_backtest_sync(rest, strategy_key: str, params: dict, payload: BacktestRunPayload,
+                        sub_strategies: Optional[dict[str, Strategy]] = None) -> dict:
     """Блокирующая часть (чтение кэша истории с диска + прогон движка) —
     выполняется в threadpool через asyncio.to_thread, чтобы не подвешивать
-    event loop (и параллельные SSE-стримы дашборда) на время бэктеста."""
+    event loop (и параллельные SSE-стримы дашборда) на время бэктеста.
+    sub_strategies уже разрешены (id->Strategy) вызывающим ДО этого хэндова
+    в поток — здесь никакого доступа к репозиторию нет и быть не должно."""
     meta = STRATEGY_REGISTRY.get(strategy_key)
     if meta is None:
         raise ValueError(f"неизвестная стратегия: {strategy_key}")
-    strategy = build_strategy(strategy_key, params)
+    strategy = build_strategy(strategy_key, params, sub_strategies)
 
     entry_tf = payload.entry_tf or params.get("tf") or "15m"
     exit_tf = payload.exit_tf
@@ -122,6 +163,7 @@ def _run_backtest_sync(rest, strategy_key: str, params: dict, payload: BacktestR
             "side": t.side.value, "entry_time_ms": t.entry_time_ms, "entry_price": t.entry_price,
             "exit_time_ms": t.exit_time_ms, "exit_price": t.exit_price, "net_pnl": t.net_pnl,
             "net_return": t.net_return, "exit_reason": t.exit_reason, "bars_held": t.bars_held,
+            "entry_reason": t.entry_reason,
         }
         for t in result.trades[-200:]
     ]
@@ -130,8 +172,8 @@ def _run_backtest_sync(rest, strategy_key: str, params: dict, payload: BacktestR
 
 @router.post("/strategies/backtest")
 async def run_strategy_backtest(payload: BacktestRunPayload, request: Request):
+    repo = request.app.state.strategy_configs
     if payload.config_id is not None:
-        repo = request.app.state.strategy_configs
         config = await repo.get(payload.config_id)
         if config is None:
             raise HTTPException(status_code=404, detail="конфигурация не найдена")
@@ -146,8 +188,14 @@ async def run_strategy_backtest(payload: BacktestRunPayload, request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    try:
+        sub_strategies = await _resolve_sub_strategies(repo, STRATEGY_REGISTRY[strategy_key], clean_params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     rest = request.app.state.rest
     try:
-        return await asyncio.to_thread(_run_backtest_sync, rest, strategy_key, clean_params, payload)
+        return await asyncio.to_thread(
+            _run_backtest_sync, rest, strategy_key, clean_params, payload, sub_strategies)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

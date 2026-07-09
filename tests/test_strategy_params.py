@@ -76,6 +76,21 @@ def test_validate_params_missing_key_falls_back_to_default():
     assert validate_params(specs, {}) == {"lookback": 20}
 
 
+def test_strategy_ref_accepts_int_like():
+    spec = ParamSpec("trending_config_id", ParamType.STRATEGY_REF, 0, "Кандидат: тренд")
+    assert spec.validate(5) == 5
+    assert spec.validate("5") == 5
+
+
+def test_strategy_ref_rejects_non_numeric():
+    spec = ParamSpec("trending_config_id", ParamType.STRATEGY_REF, 0, "Кандидат: тренд")
+    try:
+        spec.validate("bogus")
+        assert False, "should have raised"
+    except ValueError:
+        pass
+
+
 def test_validate_params_full_round_trip():
     specs = [
         ParamSpec("lookback", ParamType.INT, 20, "Окно", min=5, max=200),

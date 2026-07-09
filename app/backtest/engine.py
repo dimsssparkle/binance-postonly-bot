@@ -55,6 +55,7 @@ class Trade:
     net_pnl: float
     exit_reason: str
     bars_held: int
+    entry_reason: str = ""
 
     @property
     def entry_notional(self) -> float:
@@ -114,7 +115,7 @@ def _check_hard(candle: Candle, side: Side, tp: Optional[float], sl: Optional[fl
 
 def _make_trade(side: Side, entry_c_open: float, entry_time: int,
                 exit_price: float, exit_time: int, reason: str, bars: int,
-                cfg: BacktestConfig) -> Trade:
+                cfg: BacktestConfig, entry_reason: str = "") -> Trade:
     qty = cfg.qty
     entry_fee = entry_c_open * qty * cfg.entry_rate
     exit_fee = exit_price * qty * cfg.taker_rate
@@ -124,7 +125,7 @@ def _make_trade(side: Side, entry_c_open: float, entry_time: int,
         gross = (entry_c_open - exit_price) * qty
     net = gross - entry_fee - exit_fee
     return Trade(side, entry_time, entry_c_open, exit_time, exit_price, qty,
-                 entry_fee, exit_fee, gross, net, reason, bars)
+                 entry_fee, exit_fee, gross, net, reason, bars, entry_reason)
 
 
 class BacktestEngine:
@@ -178,7 +179,7 @@ class BacktestEngine:
                 if hit:
                     result.trades.append(_make_trade(
                         side, entry_price, entry_time, xprice, ck.close_time_ms,
-                        reason, k - entry_idx, cfg))
+                        reason, k - entry_idx, cfg, entry_reason=d.reason))
                     closed = True
                     break
                 if cfg.exit_mode == "dynamic":
@@ -189,7 +190,7 @@ class BacktestEngine:
                         xc = c_exit[k + 1]
                         result.trades.append(_make_trade(
                             side, entry_price, entry_time, xc.open, xc.close_time_ms,
-                            "dynamic:" + (dk.reason or ""), k + 1 - entry_idx, cfg))
+                            "dynamic:" + (dk.reason or ""), k + 1 - entry_idx, cfg, entry_reason=d.reason))
                         closed = True
                         k += 1
                         break
@@ -200,7 +201,7 @@ class BacktestEngine:
                 last = c_exit[-1]
                 result.trades.append(_make_trade(
                     side, entry_price, entry_time, last.close, last.close_time_ms,
-                    "end_of_data", (n - 1) - entry_idx, cfg))
+                    "end_of_data", (n - 1) - entry_idx, cfg, entry_reason=d.reason))
                 break
 
             j = k + 1

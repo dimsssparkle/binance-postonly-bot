@@ -60,3 +60,22 @@ def test_insufficient_data_returns_none():
     assert ind.rsi([1, 2, 3], 14) is None
     assert ind.atr([_c(1)], 14) is None
     assert ind.bollinger([1, 2], 20) is None
+    assert ind.adx([_c(1)], 14) is None
+
+
+def test_adx_strong_monotonic_trend_is_high():
+    # постоянный up-move каждый бар, нулевой down-move -> +DI доминирует
+    # полностью, DX=100 на каждом баре -> ADX=100
+    candles = [_c(100 + i, high=101 + i, low=99 + i) for i in range(40)]
+    assert ind.adx(candles, 14) == 100.0
+
+
+def test_adx_choppy_oscillation_is_low():
+    # чередование +1/-1 -> +DM и -DM за период уравновешивают друг друга,
+    # чистого направленного прогресса нет -> ADX близко к 0
+    closes = [100]
+    for i in range(40):
+        closes.append(closes[-1] + (1 if i % 2 == 0 else -1))
+    candles = [_c(c, high=c + 0.5, low=c - 0.5) for c in closes]
+    a = ind.adx(candles, 14)
+    assert a < 15.0

@@ -88,3 +88,17 @@ def test_always_long_single_trade_no_levels():
     result = BacktestEngine(cfg).run(AlwaysLongStrategy(), {"15m": c15m, "1m": c1m})
     assert len(result.trades) == 1
     assert result.trades[0].exit_reason == "end_of_data"
+
+
+def test_entry_reason_threaded_from_decision():
+    # Decision.reason из strategy.decide() должен долетать до Trade.entry_reason
+    # (иначе теги вроде тех, что ставит RegimeRouterStrategy, невозможно
+    # увидеть даже в JSON-ответе бэктеста).
+    c1m, c15m = [], []
+    for i in range(15 * 10):
+        c1m.append(_c(i * 60_000, 100 + i, 100 + i + 0.5, 100 + i - 0.5, 100 + i + 0.2))
+        if (i + 1) % 15 == 0:
+            c15m.append(_c((i - 14) * 60_000, 100, 200, 90, 100 + i, tf_ms=15 * 60_000))
+    cfg = BacktestConfig(tp_pct=0.0, sl_pct=0.0)
+    result = BacktestEngine(cfg).run(AlwaysLongStrategy(), {"15m": c15m, "1m": c1m})
+    assert result.trades[0].entry_reason == "always_long"

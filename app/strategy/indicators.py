@@ -91,3 +91,51 @@ def rolling_low(candles: Sequence[Candle], n: int) -> Optional[float]:
     if n <= 0 or len(candles) < n:
         return None
     return min(c.low for c in candles[-n:])
+
+
+def adx(candles: Sequence[Candle], period: int = 14) -> Optional[float]:
+    """Average Directional Index (по Уайлдеру) — сила ТРЕНДА 0..100, без
+    направления (в отличие от ATR/Bollinger, которые мерят амплитуду
+    волатильности, а не направленную устойчивость движения — рынок может
+    сильно колебаться между двумя уровнями с нулевым чистым прогрессом, и
+    ADX это отличит от настоящего тренда). Нужно минимум 2*period+1 свечей:
+    period на сидирование сглаживания TR/+DM/-DM, ещё period на сидирование
+    сглаживания итогового DX в ADX."""
+    if period <= 0 or len(candles) < 2 * period + 1:
+        return None
+    trs, plus_dms, minus_dms = [], [], []
+    for i in range(1, len(candles)):
+        h, l = candles[i].high, candles[i].low
+        ph, pl, pc = candles[i - 1].high, candles[i - 1].low, candles[i - 1].close
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        up_move, down_move = h - ph, pl - l
+        plus_dms.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dms.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+
+    def _wilder_smooth(values: list) -> list:
+        s = sum(values[:period])
+        out = [s]
+        for v in values[period:]:
+            s = s - (s / period) + v
+            out.append(s)
+        return out
+
+    tr_s = _wilder_smooth(trs)
+    pdm_s = _wilder_smooth(plus_dms)
+    mdm_s = _wilder_smooth(minus_dms)
+
+    dxs = []
+    for tr_v, pdm_v, mdm_v in zip(tr_s, pdm_s, mdm_s):
+        if tr_v == 0:
+            dxs.append(0.0)
+            continue
+        plus_di, minus_di = 100.0 * pdm_v / tr_v, 100.0 * mdm_v / tr_v
+        denom = plus_di + minus_di
+        dxs.append(100.0 * abs(plus_di - minus_di) / denom if denom else 0.0)
+
+    if len(dxs) < period:
+        return None
+    a = sum(dxs[:period]) / period
+    for dx in dxs[period:]:
+        a = (a * (period - 1) + dx) / period
+    return a

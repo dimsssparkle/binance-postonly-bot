@@ -15,6 +15,7 @@ class ParamType(str, Enum):
     FLOAT = "float"
     BOOL = "bool"
     ENUM = "enum"
+    STRATEGY_REF = "strategy_ref"  # id другого strategy_configs — см. registry.py
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,12 @@ class ParamSpec:
             if self.choices is not None and v not in self.choices:
                 raise ValueError(f"{self.name}: {v!r} не входит в {self.choices}")
             return v
+        if self.type == ParamType.STRATEGY_REF:
+            # Только структурная проверка (это id другого strategy_configs) —
+            # существование записи, отсутствие циклов (не ссылка на другой
+            # regime_router) и совпадение tf проверяются на уровне API
+            # (routes_strategies.py), где есть доступ к репозиторию.
+            return int(raw)
         raise ValueError(f"неизвестный ParamType: {self.type}")
 
 

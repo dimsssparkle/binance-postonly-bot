@@ -29,6 +29,13 @@ def _make_strategy(name: str, args):
     if name == "mean_reversion":
         from app.strategy.mean_reversion import MeanReversionStrategy
         return MeanReversionStrategy()
+    if name == "regime_router":
+        from app.strategy.mean_reversion import MeanReversionStrategy
+        from app.strategy.momentum import MomentumStrategy
+        from app.strategy.regime_router import RegimeRouterStrategy
+        return RegimeRouterStrategy(
+            MomentumStrategy(tf=args.entry_tf), MeanReversionStrategy(tf=args.entry_tf),
+            adx_period=args.adx_period, adx_threshold=args.adx_threshold, tf=args.entry_tf)
     raise SystemExit(f"unknown strategy: {name}")
 
 
@@ -59,6 +66,8 @@ def main() -> None:
     ap.add_argument("--maker-entry", action="store_true", help="считать вход maker (оптимистично)")
     ap.add_argument("--oos", type=float, default=0.3, help="доля out-of-sample хвоста")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--adx-period", type=int, default=14, help="только для --strategy regime_router")
+    ap.add_argument("--adx-threshold", type=float, default=25.0, help="только для --strategy regime_router")
     ap.add_argument("--cache-dir", default="backtest_data")
     args = ap.parse_args()
 
