@@ -27,6 +27,7 @@ class ParamSpec:
     min: Optional[float] = None        # только для INT/FLOAT
     max: Optional[float] = None
     choices: Optional[Sequence[str]] = None  # только для ENUM
+    help: str = ""                     # понятное объяснение для тултипа на дашборде
 
     def validate(self, raw: Any) -> Any:
         if self.type == ParamType.INT:

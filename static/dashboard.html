@@ -75,6 +75,17 @@
   .actions { display: flex; flex-direction: column; gap: 10px; }
   .actions .row { display: flex; gap: 8px; }
   .qty-row { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-soft); }
+
+  .tip { position: relative; display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; border-radius: 50%; background: var(--rule); color: var(--ink-soft);
+    font-size: 10px; font-weight: 700; cursor: help; flex-shrink: 0; }
+  .tip .tip-text {
+    display: none; position: absolute; left: 0; top: 20px; z-index: 20;
+    width: 260px; padding: 9px 11px; border-radius: 8px; background: var(--panel);
+    border: 1px solid var(--rule); box-shadow: 0 6px 16px rgba(0,0,0,.18);
+    color: var(--ink-soft); font-size: 12px; font-weight: 400; line-height: 1.45; white-space: normal;
+  }
+  .tip:hover .tip-text, .tip:focus .tip-text { display: block; }
   input[type=number] {
     width: 90px; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--rule);
     background: var(--bg); color: var(--ink); font-family: var(--mono); font-size: 13px;
@@ -685,36 +696,42 @@ const backtestKv = document.getElementById('backtestKv');
 const btnRunBacktest = document.getElementById('btnRunBacktest');
 
 // Форма параметров рендерится ПОЛНОСТЬЮ из ParamSpec с бэкенда — новая
-// стратегия в реестре не потребует правок этого файла.
+// стратегия в реестре не потребует правок этого файла. Тултип (p.help)
+// объясняет параметр не-специалисту: что это, как менять, на что влияет.
+function labelWithTip(p) {
+  const tip = p.help ? `<span class="tip" tabindex="0">?<span class="tip-text">${p.help}</span></span>` : '';
+  return `${p.label}${tip}:`;
+}
+
 function renderParamForm(meta, currentParams) {
   currentParams = currentParams || {};
   strategyParamsForm.innerHTML = meta.params.map(p => {
     const val = currentParams[p.name] !== undefined ? currentParams[p.name] : p.default;
     const id = 'sp_' + p.name;
     if (p.type === 'bool') {
-      return `<div class="qty-row">${p.label}: <input type="checkbox" id="${id}" ${val ? 'checked' : ''}/></div>`;
+      return `<div class="qty-row">${labelWithTip(p)} <input type="checkbox" id="${id}" ${val ? 'checked' : ''}/></div>`;
     }
     if (p.type === 'enum') {
       const opts = (p.choices || []).map(c =>
         `<option value="${c}" ${c === val ? 'selected' : ''}>${c}</option>`).join('');
-      return `<div class="qty-row">${p.label}: <select id="${id}">${opts}</select></div>`;
+      return `<div class="qty-row">${labelWithTip(p)} <select id="${id}">${opts}</select></div>`;
     }
     if (p.type === 'strategy_ref') {
       // Кандидаты — сохранённые strategy_configs, кроме самих regime_router
       // (без вложенных роутеров, зеркалит серверную защиту от циклов).
       const candidates = strategyConfigs.filter(c => c.strategy_key !== 'regime_router');
       if (!candidates.length) {
-        return `<div class="qty-row">${p.label}: <span class="cell-sub">сначала создайте momentum/mean_reversion конфигурацию</span></div>`;
+        return `<div class="qty-row">${labelWithTip(p)} <span class="cell-sub">сначала создайте momentum/mean_reversion конфигурацию</span></div>`;
       }
       const opts = candidates.map(c =>
         `<option value="${c.id}" ${c.id === val ? 'selected' : ''}>${c.name} (${(strategyTypes[c.strategy_key] || {}).label || c.strategy_key})</option>`
       ).join('');
-      return `<div class="qty-row">${p.label}: <select id="${id}">${opts}</select></div>`;
+      return `<div class="qty-row">${labelWithTip(p)} <select id="${id}">${opts}</select></div>`;
     }
     const step = p.type === 'int' ? '1' : '0.001';
     const minAttr = p.min != null ? `min="${p.min}"` : '';
     const maxAttr = p.max != null ? `max="${p.max}"` : '';
-    return `<div class="qty-row">${p.label}: <input type="number" id="${id}" step="${step}" ${minAttr} ${maxAttr} value="${val}"/></div>`;
+    return `<div class="qty-row">${labelWithTip(p)} <input type="number" id="${id}" step="${step}" ${minAttr} ${maxAttr} value="${val}"/></div>`;
   }).join('');
 }
 
