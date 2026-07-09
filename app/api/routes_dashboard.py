@@ -210,17 +210,21 @@ async def orders_open(request: Request, symbol: Optional[str] = None):
 
 
 @router.get("/candles")
-def candles(request: Request, symbol: Optional[str] = None, tf: str = "15m", limit: int = 200):
+def candles(request: Request, symbol: Optional[str] = None, tf: str = "15m", limit: int = 200,
+            end_time: Optional[int] = None):
+    """`end_time` (ms) — для догрузки более старой истории при скролле
+    графика назад (Binance тогда возвращает `limit` свечей, закончившихся
+    ДО end_time; без него — последние `limit`, включая текущую формирующуюся)."""
     engine = request.app.state.engine
     sym = (symbol or engine.symbol).upper()
     rest = request.app.state.rest
     try:
-        raw = rest.get_klines(sym, tf, limit=limit)
+        raw = rest.get_klines(sym, tf, limit=limit, end_time=end_time)
     except Exception as e:
         log.warning(f"[DASHBOARD] klines failed: {e}")
         return {"candles": []}
     # [openTime, open, high, low, close, volume, closeTime, ...] -> компактно
-    return {"candles": [[k[0], float(k[1]), float(k[2]), float(k[3]), float(k[4])] for k in raw]}
+    return {"candles": [[k[0], float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in raw]}
 
 
 @router.get("/intents")

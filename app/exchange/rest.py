@@ -139,11 +139,15 @@ class BinanceRestClient:
             "marginBalance": acc.get("totalMarginBalance", "0"),
         }
 
-    def get_klines(self, symbol: str, interval: str, limit: int = 200) -> list:
-        """Последние `limit` свечей — для превью-графика на дашборде (не
-        путать с app/backtest/data.py::fetch_klines, та — для бэктеста, с
-        постраничной подгрузкой и дисковым кэшем на годы истории)."""
-        return self.client.klines(symbol=symbol.upper(), interval=interval, limit=limit)
+    def get_klines(self, symbol: str, interval: str, limit: int = 200,
+                    end_time: Optional[int] = None) -> list:
+        """Свечи для графика на дашборде (не путать с
+        app/backtest/data.py::fetch_klines, та — для бэктеста, с постраничной
+        подгрузкой и дисковым кэшем на годы истории). `end_time` (ms) — для
+        подгрузки более старой истории при скролле графика назад (Binance
+        возвращает `limit` свечей, ЗАКОНЧИВШИХСЯ до end_time)."""
+        kwargs = {"endTime": end_time} if end_time is not None else {}
+        return self.client.klines(symbol=symbol.upper(), interval=interval, limit=limit, **kwargs)
 
     # --- User Data Stream (listenKey) ---
     def new_listen_key(self) -> str:

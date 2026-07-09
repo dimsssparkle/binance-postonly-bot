@@ -112,8 +112,7 @@
 
   .empty { color: var(--ink-faint); font-size: 13px; padding: 8px 0; }
 
-  .chart-wrap { position: relative; width: 100%; height: 220px; }
-  .chart-wrap canvas { width: 100%; height: 100%; display: block; }
+  .chart-wrap { position: relative; width: 100%; height: 340px; }
 </style>
 </head>
 <body>
@@ -177,7 +176,7 @@
 
   <div class="card" style="margin-bottom:14px">
     <h2>График <span style="text-transform:none;font-weight:400" id="chartTf">15m</span></h2>
-    <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
+    <div class="chart-wrap" id="chartContainer"></div>
   </div>
 
   <div class="card" style="margin-bottom:14px">
@@ -199,6 +198,7 @@
   </div>
 </div>
 
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
 <script>
 const qs = (k, d) => new URL(location.href).searchParams.get(k) || d;
 const sym = (qs("symbol", "ETHUSDT") + "").toUpperCase();
@@ -487,94 +487,137 @@ function connect() {
 }
 connect();
 
-// --- График свечей + живые тики (обновление формирующейся свечи) ---
-const chartCanvas = document.getElementById('priceChart');
-const chartCtx = chartCanvas.getContext('2d');
-let candles = [];
+// --- График свечей (TradingView Lightweight Charts) + живые тики + подгрузка истории ---
+const TF_MS = 15 * 60 * 1000; // фиксированный таймфрейм 15m (переключателя пока нет)
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
-function resizeCanvas() {
-  const wrap = chartCanvas.parentElement;
-  const dpr = window.devicePixelRatio || 1;
-  chartCanvas.width = wrap.clientWidth * dpr;
-  chartCanvas.height = wrap.clientHeight * dpr;
-}
+const chartContainer = document.getElementById('chartContainer');
+const chart = LightweightCharts.createChart(chartContainer, {
+  autoSize: true,
+  layout: { background: { color: 'transparent' }, textColor: cssVar('--ink-faint') },
+  grid: { vertLines: { color: cssVar('--rule') }, horzLines: { color: cssVar('--rule') } },
+  rightPriceScale: { borderColor: cssVar('--rule') },
+  timeScale: { borderColor: cssVar('--rule'), timeVisible: true, secondsVisible: false },
+  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+});
 
-function drawChart() {
-  if (!candles.length) return;
-  resizeCanvas();
-  const dpr = window.devicePixelRatio || 1;
-  const w = chartCanvas.width, h = chartCanvas.height;
-  chartCtx.clearRect(0, 0, w, h);
+const candleSeries = chart.addCandlestickSeries({
+  upColor: cssVar('--done'), downColor: cssVar('--failed'),
+  borderUpColor: cssVar('--done'), borderDownColor: cssVar('--failed'),
+  wickUpColor: cssVar('--done'), wickDownColor: cssVar('--failed'),
+});
+candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.25 } });
 
-  const styles = getComputedStyle(document.documentElement);
-  const doneColor = styles.getPropertyValue('--done').trim();
-  const failedColor = styles.getPropertyValue('--failed').trim();
-  const ruleColor = styles.getPropertyValue('--rule').trim();
-  const faintColor = styles.getPropertyValue('--ink-faint').trim();
+const volumeSeries = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '' });
+volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
 
-  const highs = candles.map(c => c[2]), lows = candles.map(c => c[3]);
-  const maxP = Math.max(...highs), minP = Math.min(...lows);
-  const pad = (maxP - minP) * 0.08 || 1;
-  const top = maxP + pad, bottom = minP - pad;
-  const priceToY = p => h - ((p - bottom) / (top - bottom)) * h;
-
-  const n = candles.length;
-  const slot = w / n;
-  const bodyW = Math.max(dpr, slot * 0.6);
-
-  chartCtx.strokeStyle = ruleColor;
-  chartCtx.lineWidth = dpr;
-  for (let i = 0; i <= 4; i++) {
-    const y = (h / 4) * i;
-    chartCtx.beginPath(); chartCtx.moveTo(0, y); chartCtx.lineTo(w, y); chartCtx.stroke();
-  }
-
-  candles.forEach((c, i) => {
-    const [, o, hi, lo, cl] = c;
-    const x = i * slot + slot / 2;
-    const up = cl >= o;
-    const color = up ? doneColor : failedColor;
-    chartCtx.strokeStyle = color;
-    chartCtx.fillStyle = color;
-    chartCtx.lineWidth = dpr;
-    chartCtx.beginPath();
-    chartCtx.moveTo(x, priceToY(hi));
-    chartCtx.lineTo(x, priceToY(lo));
-    chartCtx.stroke();
-    const yO = priceToY(o), yC = priceToY(cl);
-    const bodyTop = Math.min(yO, yC), bodyH = Math.max(dpr, Math.abs(yC - yO));
-    chartCtx.fillRect(x - bodyW / 2, bodyTop, bodyW, bodyH);
+function applyChartTheme() {
+  chart.applyOptions({
+    layout: { textColor: cssVar('--ink-faint') },
+    grid: { vertLines: { color: cssVar('--rule') }, horzLines: { color: cssVar('--rule') } },
+    rightPriceScale: { borderColor: cssVar('--rule') },
+    timeScale: { borderColor: cssVar('--rule') },
   });
+  candleSeries.applyOptions({
+    upColor: cssVar('--done'), downColor: cssVar('--failed'),
+    borderUpColor: cssVar('--done'), borderDownColor: cssVar('--failed'),
+    wickUpColor: cssVar('--done'), wickDownColor: cssVar('--failed'),
+  });
+}
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyChartTheme);
 
-  const last = candles[candles.length - 1];
-  chartCtx.fillStyle = faintColor;
-  chartCtx.font = `${11 * dpr}px -apple-system, sans-serif`;
-  chartCtx.textAlign = 'right';
-  chartCtx.fillText(fmtNum(last[4], 2), w - 4 * dpr, 14 * dpr);
+// c: [openTimeMs, open, high, low, close, volume]
+const toBar = c => ({ time: Math.floor(c[0] / 1000), open: c[1], high: c[2], low: c[3], close: c[4] });
+const toVol = c => ({ time: Math.floor(c[0] / 1000), value: c[5], color: c[4] >= c[1] ? cssVar('--done') : cssVar('--failed') });
+
+let loadedCandles = []; // по возрастанию времени, тот же формат, что отдаёт /candles
+let loadingHistory = false;
+let hasMoreHistory = true;
+let currentBarTimeSec = null;
+
+function renderAll() {
+  candleSeries.setData(loadedCandles.map(toBar));
+  volumeSeries.setData(loadedCandles.map(toVol));
 }
 
-async function loadCandles() {
+async function loadInitialCandles() {
   try {
-    const r = await fetch(`/candles?symbol=${encodeURIComponent(sym)}&tf=15m&limit=100`);
+    const r = await fetch(`/candles?symbol=${encodeURIComponent(sym)}&tf=15m&limit=300`);
     const j = await r.json();
-    if (j.candles && j.candles.length) { candles = j.candles; drawChart(); }
-  } catch (e) { /* держим последние известные свечи */ }
+    if (j.candles && j.candles.length) {
+      loadedCandles = j.candles;
+      renderAll();
+      currentBarTimeSec = Math.floor(loadedCandles[loadedCandles.length - 1][0] / 1000);
+    }
+  } catch (e) { /* держим то, что уже загружено */ }
 }
-loadCandles();
-setInterval(loadCandles, 60000);
-window.addEventListener('resize', drawChart);
+loadInitialCandles();
+
+// Догрузка более старой истории при скролле/зуме к левому краю — так же,
+// как Binance подгружает старые свечи по мере прокрутки графика назад.
+chart.timeScale().subscribeVisibleLogicalRangeChange(async (range) => {
+  if (!range || loadingHistory || !hasMoreHistory || !loadedCandles.length) return;
+  if (range.from < 10) {
+    loadingHistory = true;
+    const oldestMs = loadedCandles[0][0];
+    try {
+      const r = await fetch(`/candles?symbol=${encodeURIComponent(sym)}&tf=15m&limit=300&end_time=${oldestMs - 1}`);
+      const j = await r.json();
+      if (j.candles && j.candles.length) {
+        loadedCandles = j.candles.concat(loadedCandles);
+        renderAll();
+      } else {
+        hasMoreHistory = false;
+      }
+    } catch (e) { /* попробуем ещё раз при следующей прокрутке */ }
+    loadingHistory = false;
+  }
+});
+
+// Лёгкая периодическая сверка ХВОСТА с биржей (не полный setData — это
+// сбросило бы текущий зум/пан пользователя): подтягивает официальные
+// OHLCV последних баров (в т.ч. объём формирующейся свечи, который тики
+// не наращивают) точечными update() без изменения видимого диапазона.
+async function resyncTail() {
+  try {
+    const r = await fetch(`/candles?symbol=${encodeURIComponent(sym)}&tf=15m&limit=3`);
+    const j = await r.json();
+    if (!j.candles || !j.candles.length) return;
+    for (const c of j.candles) {
+      const idx = loadedCandles.findIndex(x => x[0] === c[0]);
+      if (idx === -1) { loadedCandles.push(c); } else { loadedCandles[idx] = c; }
+      candleSeries.update(toBar(c));
+      volumeSeries.update(toVol(c));
+    }
+    currentBarTimeSec = Math.floor(loadedCandles[loadedCandles.length - 1][0] / 1000);
+  } catch (e) { /* попробуем на следующем тике */ }
+}
+setInterval(resyncTail, 60000);
 
 function connectPriceStream() {
   const priceEs = new EventSource('/price/stream');
   priceEs.onmessage = (ev) => {
     try {
       const data = JSON.parse(ev.data);
-      if (!candles.length || data.price == null || !(data.price > 0)) return;
-      const last = candles[candles.length - 1];
-      last[4] = data.price;
-      if (data.price > last[2]) last[2] = data.price;
-      if (data.price < last[3]) last[3] = data.price;
-      drawChart();
+      if (data.price == null || !(data.price > 0) || currentBarTimeSec == null) return;
+      const tsMs = data.ts != null ? data.ts : Date.now();
+      const bucketSec = Math.floor(tsMs / TF_MS) * (TF_MS / 1000);
+      if (bucketSec > currentBarTimeSec) {
+        // Началась новая 15-минутка — открываем новый бар вместо бесконечной
+        // мутации предыдущего (старый canvas-рендерер этого не делал и мог
+        // держать давно закрывшийся бар "формирующимся" до следующего loadCandles).
+        currentBarTimeSec = bucketSec;
+        const bar = [bucketSec * 1000, data.price, data.price, data.price, data.price, 0];
+        loadedCandles.push(bar);
+      } else {
+        const last = loadedCandles[loadedCandles.length - 1];
+        last[4] = data.price;
+        if (data.price > last[2]) last[2] = data.price;
+        if (data.price < last[3]) last[3] = data.price;
+      }
+      const last = loadedCandles[loadedCandles.length - 1];
+      candleSeries.update(toBar(last));
+      volumeSeries.update(toVol(last));
     } catch (e) { /* игнор битого кадра */ }
   };
 }
