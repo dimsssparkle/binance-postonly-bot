@@ -9,6 +9,7 @@ from starlette.staticfiles import StaticFiles
 
 from app.api.routes_control import router as control_router
 from app.api.routes_dashboard import router as dashboard_router
+from app.api.routes_strategies import router as strategies_router
 from app.config import (
     CLOSE_TIMEOUT_MS, DB_PATH, HEDGE_MODE, LEVERAGE_DEFAULT, LOG_LEVEL,
     MAX_CLOSE_RETRIES, MAX_MAKER_ATTEMPTS, ORDER_TIMEOUT_MS, PORT, QTY_DEFAULT,
@@ -28,6 +29,7 @@ from app.persistence.repository import (
     BookSnapshotRepository, EventLogRepository, IntentOrderRepository, IntentRepository,
     ListenKeyRepository, SettingsRepository,
 )
+from app.persistence.strategy_repository import StrategyConfigRepository
 from app.strategy.noop import NoopStrategy
 from app.strategy.runner import StrategyRunner
 
@@ -64,6 +66,7 @@ async def lifespan(app: FastAPI):
     listen_keys = ListenKeyRepository(conn)
     settings = SettingsRepository(conn)
     book_snapshots = BookSnapshotRepository(conn)
+    strategy_configs = StrategyConfigRepository(conn)
 
     # Запускаем раньше остального: движок использует его live-кэш bid/ask
     # для ценообразования ордеров (см. ExecutionEngine._get_book), плюс
@@ -119,6 +122,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.book_snapshots = book_snapshots
     app.state.leverage_brackets = leverage_brackets
+    app.state.strategy_configs = strategy_configs
 
     reconciler = Reconciler(engine)
     await reconciler.run()
@@ -142,6 +146,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Binance Bot v2 (execution engine)", version="2.0.0", lifespan=lifespan)
 app.include_router(control_router)
 app.include_router(dashboard_router)
+app.include_router(strategies_router)
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 
 

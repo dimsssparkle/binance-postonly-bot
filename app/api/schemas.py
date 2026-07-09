@@ -1,6 +1,6 @@
 from __future__ import annotations
-from typing import Optional
-from pydantic import BaseModel, field_validator
+from typing import Any, Optional
+from pydantic import BaseModel, field_validator, model_validator
 
 
 def _validate_side(v: str) -> str:
@@ -46,3 +46,42 @@ class TradingSettingsPayload(BaseModel):
         if v is not None and not (1 <= v <= 125):
             raise ValueError("leverage must be between 1 and 125")
         return v
+
+
+class StrategyConfigCreatePayload(BaseModel):
+    strategy_key: str
+    name: str
+    params: dict[str, Any] = {}
+
+
+class StrategyConfigUpdatePayload(BaseModel):
+    name: str
+    params: dict[str, Any] = {}
+
+
+class EnabledPayload(BaseModel):
+    enabled: bool
+
+
+class BacktestRunPayload(BaseModel):
+    # либо сохранённый конфиг (config_id), либо ad-hoc (strategy_key+params) —
+    # ровно один из двух наборов должен быть задан.
+    config_id: Optional[int] = None
+    strategy_key: Optional[str] = None
+    params: Optional[dict[str, Any]] = None
+
+    symbol: str = "ETHUSDT"
+    days: int = 180
+    entry_tf: Optional[str] = None
+    exit_tf: str = "1m"
+    tp_pct: float = 0.0023
+    sl_pct: float = 0.0015
+    exit_mode: str = "fixed"
+
+    @model_validator(mode="after")
+    def validate_exactly_one_source(self):
+        has_config = self.config_id is not None
+        has_adhoc = self.strategy_key is not None
+        if has_config == has_adhoc:
+            raise ValueError("укажите ровно одно из: config_id ИЛИ strategy_key")
+        return self

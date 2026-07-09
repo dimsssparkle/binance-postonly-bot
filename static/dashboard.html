@@ -79,6 +79,10 @@
     width: 90px; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--rule);
     background: var(--bg); color: var(--ink); font-family: var(--mono); font-size: 13px;
   }
+  input[type=text], select {
+    padding: 7px 9px; border-radius: 7px; border: 1px solid var(--rule);
+    background: var(--bg); color: var(--ink); font-family: var(--mono); font-size: 13px;
+  }
   button {
     flex: 1; padding: 9px 12px; border-radius: 7px; border: 1px solid var(--rule);
     background: var(--panel); color: var(--ink); font-size: 13.5px; font-weight: 600; cursor: pointer;
@@ -177,6 +181,37 @@
   <div class="card" style="margin-bottom:14px">
     <h2>График <span style="text-transform:none;font-weight:400" id="chartTf">15m</span></h2>
     <div class="chart-wrap" id="chartContainer"></div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px">
+    <h2>Стратегии <span style="text-transform:none;font-weight:400">(бэктест-конфигурации — в бой пока не подключено)</span></h2>
+    <div class="table-scroll">
+      <table id="strategiesTable">
+        <thead><tr><th>Имя</th><th>Тип</th><th>Вкл.</th><th></th></tr></thead>
+        <tbody><tr><td colspan="4" class="empty">загрузка…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="btnNewStrategy">+ Новая стратегия</button>
+    </div>
+    <div id="strategyEditPanel" style="display:none; margin-top:14px; border-top:1px solid var(--rule); padding-top:14px">
+      <div class="actions">
+        <div class="qty-row">Тип: <select id="strategyTypeSelect"></select></div>
+        <div class="qty-row">Имя: <input type="text" id="strategyNameInput" style="width:200px"/></div>
+        <div id="strategyParamsForm" class="actions"></div>
+        <div class="row">
+          <button id="btnSaveStrategy">Сохранить</button>
+          <button id="btnCancelStrategy" class="close">Отмена</button>
+        </div>
+        <div class="row">
+          <button id="btnRunBacktest">Бэктест</button>
+        </div>
+        <div class="action-msg" id="strategyMsg"></div>
+      </div>
+    </div>
+    <div id="backtestResultPanel" style="display:none; margin-top:14px; border-top:1px solid var(--rule); padding-top:14px">
+      <dl class="kv" id="backtestKv"></dl>
+    </div>
   </div>
 
   <div class="card" style="margin-bottom:14px">
@@ -622,6 +657,210 @@ function connectPriceStream() {
   };
 }
 connectPriceStream();
+
+// --- Стратегии: параметризованные конфигурации + бэктест из дашборда ---
+async function postJson(url, method, body) {
+  const r = await fetch(url, {
+    method, headers: {'Content-Type': 'application/json'},
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const text = await r.text();
+  let j = {};
+  try { j = text ? JSON.parse(text) : {}; } catch (e) { throw new Error('битый ответ: ' + text); }
+  if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  return j;
+}
+
+let strategyTypes = {};
+let strategyConfigs = [];
+let editingConfigId = null; // null = создание новой конфигурации
+
+const strategyTypeSelect = document.getElementById('strategyTypeSelect');
+const strategyNameInput = document.getElementById('strategyNameInput');
+const strategyParamsForm = document.getElementById('strategyParamsForm');
+const strategyEditPanel = document.getElementById('strategyEditPanel');
+const strategyMsg = document.getElementById('strategyMsg');
+const backtestResultPanel = document.getElementById('backtestResultPanel');
+const backtestKv = document.getElementById('backtestKv');
+const btnRunBacktest = document.getElementById('btnRunBacktest');
+
+// Форма параметров рендерится ПОЛНОСТЬЮ из ParamSpec с бэкенда — новая
+// стратегия в реестре не потребует правок этого файла.
+function renderParamForm(meta, currentParams) {
+  currentParams = currentParams || {};
+  strategyParamsForm.innerHTML = meta.params.map(p => {
+    const val = currentParams[p.name] !== undefined ? currentParams[p.name] : p.default;
+    const id = 'sp_' + p.name;
+    if (p.type === 'bool') {
+      return `<div class="qty-row">${p.label}: <input type="checkbox" id="${id}" ${val ? 'checked' : ''}/></div>`;
+    }
+    if (p.type === 'enum') {
+      const opts = (p.choices || []).map(c =>
+        `<option value="${c}" ${c === val ? 'selected' : ''}>${c}</option>`).join('');
+      return `<div class="qty-row">${p.label}: <select id="${id}">${opts}</select></div>`;
+    }
+    const step = p.type === 'int' ? '1' : '0.001';
+    const minAttr = p.min != null ? `min="${p.min}"` : '';
+    const maxAttr = p.max != null ? `max="${p.max}"` : '';
+    return `<div class="qty-row">${p.label}: <input type="number" id="${id}" step="${step}" ${minAttr} ${maxAttr} value="${val}"/></div>`;
+  }).join('');
+}
+
+function readParamForm(meta) {
+  const out = {};
+  meta.params.forEach(p => {
+    const el = document.getElementById('sp_' + p.name);
+    if (p.type === 'bool') out[p.name] = el.checked;
+    else if (p.type === 'enum') out[p.name] = el.value;
+    else if (p.type === 'int') out[p.name] = parseInt(el.value, 10);
+    else out[p.name] = parseFloat(el.value);
+  });
+  return out;
+}
+
+async function loadStrategyTypes() {
+  const r = await fetch('/strategies/types');
+  strategyTypes = await r.json();
+  strategyTypeSelect.innerHTML = Object.entries(strategyTypes)
+    .map(([key, meta]) => `<option value="${key}">${meta.label}</option>`).join('');
+}
+
+async function loadStrategyConfigs() {
+  const tbody = document.querySelector('#strategiesTable tbody');
+  try {
+    const r = await fetch('/strategies/configs');
+    const j = await r.json();
+    strategyConfigs = j.configs || [];
+    renderStrategiesTable();
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">ошибка загрузки</td></tr>';
+  }
+}
+
+function renderStrategiesTable() {
+  const tbody = document.querySelector('#strategiesTable tbody');
+  if (!strategyConfigs.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">пока нет конфигураций</td></tr>';
+    return;
+  }
+  tbody.innerHTML = strategyConfigs.map(c => `
+    <tr>
+      <td>${c.name}</td>
+      <td>${(strategyTypes[c.strategy_key] || {}).label || c.strategy_key}</td>
+      <td><input type="checkbox" data-id="${c.id}" class="strategyEnabledToggle" ${c.enabled ? 'checked' : ''}/></td>
+      <td>
+        <button data-id="${c.id}" class="strategyEditBtn">Изменить</button>
+        <button data-id="${c.id}" class="strategyDeleteBtn close">Удалить</button>
+      </td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('.strategyEnabledToggle').forEach(cb => {
+    cb.onchange = async () => {
+      try {
+        await postJson(`/strategies/configs/${cb.dataset.id}/enabled`, 'POST', { enabled: cb.checked });
+      } catch (e) {
+        alert('Ошибка: ' + e.message);
+        cb.checked = !cb.checked;
+      }
+    };
+  });
+  tbody.querySelectorAll('.strategyEditBtn').forEach(b => {
+    b.onclick = () => openStrategyEditPanel(Number(b.dataset.id));
+  });
+  tbody.querySelectorAll('.strategyDeleteBtn').forEach(b => {
+    b.onclick = async () => {
+      if (!confirm('Удалить конфигурацию?')) return;
+      await postJson(`/strategies/configs/${b.dataset.id}`, 'DELETE');
+      await loadStrategyConfigs();
+    };
+  });
+}
+
+function openStrategyEditPanel(configId) {
+  editingConfigId = configId;
+  backtestResultPanel.style.display = 'none';
+  strategyMsg.textContent = '';
+  if (configId == null) {
+    strategyTypeSelect.disabled = false;
+    strategyNameInput.value = '';
+    renderParamForm(strategyTypes[strategyTypeSelect.value], {});
+  } else {
+    const cfg = strategyConfigs.find(c => c.id === configId);
+    strategyTypeSelect.value = cfg.strategy_key;
+    strategyTypeSelect.disabled = true; // тип существующей записи не меняем
+    strategyNameInput.value = cfg.name;
+    renderParamForm(strategyTypes[cfg.strategy_key], cfg.params);
+  }
+  strategyEditPanel.style.display = 'block';
+}
+
+document.getElementById('btnNewStrategy').onclick = () => openStrategyEditPanel(null);
+document.getElementById('btnCancelStrategy').onclick = () => {
+  strategyEditPanel.style.display = 'none';
+  editingConfigId = null;
+};
+strategyTypeSelect.onchange = () => {
+  if (!strategyTypeSelect.disabled) renderParamForm(strategyTypes[strategyTypeSelect.value], {});
+};
+
+document.getElementById('btnSaveStrategy').onclick = async () => {
+  const key = strategyTypeSelect.value;
+  const meta = strategyTypes[key];
+  const params = readParamForm(meta);
+  const name = strategyNameInput.value.trim() || meta.label;
+  strategyMsg.textContent = 'сохранение…';
+  try {
+    if (editingConfigId == null) {
+      await postJson('/strategies/configs', 'POST', { strategy_key: key, name, params });
+    } else {
+      await postJson(`/strategies/configs/${editingConfigId}`, 'PUT', { name, params });
+    }
+    strategyMsg.textContent = 'Сохранено';
+    await loadStrategyConfigs();
+  } catch (e) {
+    strategyMsg.textContent = 'Ошибка: ' + e.message;
+  }
+};
+
+btnRunBacktest.onclick = async () => {
+  const key = strategyTypeSelect.value;
+  const meta = strategyTypes[key];
+  const params = readParamForm(meta);
+  strategyMsg.textContent = 'бэктест… (может занять несколько секунд)';
+  btnRunBacktest.disabled = true;
+  try {
+    const j = await postJson('/strategies/backtest', 'POST', { strategy_key: key, params });
+    renderBacktestResult(j.report);
+    strategyMsg.textContent = '';
+  } catch (e) {
+    strategyMsg.textContent = 'Ошибка бэктеста: ' + e.message;
+  } finally {
+    btnRunBacktest.disabled = false;
+  }
+};
+
+function renderBacktestResult(r) {
+  const verdict = r.avg_net_return > r.fee_floor
+    ? '<span class="pos-val">выше пола комиссий ✓</span>'
+    : '<span class="neg-val">ниже пола комиссий ✗</span>';
+  backtestKv.innerHTML = `
+    <dt>Сделок</dt><dd>${r.num_trades}</dd>
+    <dt>Винрейт</dt><dd>${(r.win_rate * 100).toFixed(1)}% (${r.num_wins}/${r.num_trades})</dd>
+    <dt>Чистый PnL</dt><dd class="${pnlClass(r.total_net_pnl)}">${fmtNum(r.total_net_pnl, 4)}</dd>
+    <dt>Комиссии</dt><dd>${fmtNum(r.total_fees, 4)}</dd>
+    <dt>Ср. чистый/сделку</dt><dd>${(r.avg_net_return * 100).toFixed(4)}% (пол ${(r.fee_floor * 100).toFixed(4)}%) ${verdict}</dd>
+    <dt>Макс. просадка</dt><dd>${fmtNum(r.max_drawdown, 4)}</dd>
+    <dt>Profit factor</dt><dd>${fmtNum(r.profit_factor, 2)}</dd>
+    <dt>Ср. удержание (баров)</dt><dd>${fmtNum(r.avg_bars_held, 1)}</dd>
+    <dt>Buy & hold за период</dt><dd>${(r.buy_hold_return * 100).toFixed(2)}%</dd>
+  `;
+  backtestResultPanel.style.display = 'block';
+}
+
+(async () => {
+  await loadStrategyTypes();
+  await loadStrategyConfigs();
+})();
 </script>
 </body>
 </html>

@@ -79,3 +79,18 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
 
 CREATE INDEX IF NOT EXISTS ix_book_snapshots_ts ON book_snapshots(ts_ms);
 CREATE INDEX IF NOT EXISTS ix_book_snapshots_symbol_ts ON book_snapshots(symbol, ts_ms);
+
+-- Именованные конфигурации параметров стратегий, настраиваемые с дашборда.
+-- enabled = "кандидат для будущего роутера режимов", НЕ "торгует сейчас" —
+-- в Фазе A ничего боевое этот флаг не читает, это просто чекбокс.
+CREATE TABLE IF NOT EXISTS strategy_configs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_key    TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    params_json     TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    created_at_ms   INTEGER NOT NULL,
+    updated_at_ms   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_strategy_configs_key ON strategy_configs(strategy_key);
