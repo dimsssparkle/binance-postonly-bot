@@ -127,7 +127,7 @@
 
   .empty { color: var(--ink-faint); font-size: 13px; padding: 8px 0; }
 
-  .chart-wrap { position: relative; width: 100%; height: 340px; }
+  .chart-wrap { position: relative; width: 100%; height: 420px; }
 </style>
 </head>
 <body>
@@ -210,6 +210,7 @@
         <div class="qty-row">Тип: <select id="strategyTypeSelect"></select></div>
         <div class="qty-row">Имя: <input type="text" id="strategyNameInput" style="width:200px"/></div>
         <div id="strategyParamsForm" class="actions"></div>
+        <div class="cell-sub" id="previewHint" style="display:none"></div>
         <div class="row">
           <button id="btnSaveStrategy">Сохранить</button>
           <button id="btnCancelStrategy" class="close">Отмена</button>
@@ -555,7 +556,76 @@ const candleSeries = chart.addCandlestickSeries({
 candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.25 } });
 
 const volumeSeries = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: '' });
-volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+const VOLUME_MARGINS_DEFAULT = { top: 0.82, bottom: 0 };
+const VOLUME_MARGINS_WITH_OSCILLATOR = { top: 0.55, bottom: 0.32 };
+volumeSeries.priceScale().applyOptions({ scaleMargins: VOLUME_MARGINS_DEFAULT });
+
+// --- Превью параметров стратегии на графике (канал momentum / осциллятор
+// RSI-ADX для mean_reversion/regime_router) — см. renderParamForm ниже.
+// Серии заведены один раз и по умолчанию пустые — так проще управлять
+// видимостью (setData([])), чем создавать/удалять серии на лету.
+const previewUpperSeries = chart.addLineSeries({
+  color: cssVar('--accent'), lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+});
+const previewLowerSeries = chart.addLineSeries({
+  color: cssVar('--accent'), lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+});
+const previewOscillatorSeries = chart.addLineSeries({
+  color: cssVar('--accent'), lineWidth: 1, priceScaleId: 'preview-oscillator',
+  priceLineVisible: false, lastValueVisible: false,
+});
+previewOscillatorSeries.priceScale().applyOptions({ scaleMargins: { top: 1, bottom: 0 } }); // скрыт по умолчанию
+let oscillatorPriceLines = [];
+let oscillatorActive = false;
+
+function setOscillatorLayout(active) {
+  oscillatorActive = active;
+  if (active) {
+    candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.50 } });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: VOLUME_MARGINS_WITH_OSCILLATOR });
+    previewOscillatorSeries.priceScale().applyOptions({ scaleMargins: { top: 0.70, bottom: 0 } });
+  } else {
+    candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.25 } });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: VOLUME_MARGINS_DEFAULT });
+    previewOscillatorSeries.priceScale().applyOptions({ scaleMargins: { top: 1, bottom: 0 } });
+  }
+}
+
+function clearOscillatorPriceLines() {
+  oscillatorPriceLines.forEach(pl => previewOscillatorSeries.removePriceLine(pl));
+  oscillatorPriceLines = [];
+}
+
+function clearStrategyPreview() {
+  previewUpperSeries.setData([]);
+  previewLowerSeries.setData([]);
+  previewOscillatorSeries.setData([]);
+  clearOscillatorPriceLines();
+  setOscillatorLayout(false);
+}
+
+function applyStrategyPreview(resp) {
+  if (resp.kind === 'price_channel') {
+    setOscillatorLayout(false);
+    previewOscillatorSeries.setData([]);
+    clearOscillatorPriceLines();
+    previewUpperSeries.setData(resp.series.upper || []);
+    previewLowerSeries.setData(resp.series.lower || []);
+  } else if (resp.kind === 'oscillator') {
+    previewUpperSeries.setData([]);
+    previewLowerSeries.setData([]);
+    setOscillatorLayout(true);
+    const lineKey = Object.keys(resp.series)[0]; // 'rsi' или 'adx' — единственный ключ
+    previewOscillatorSeries.setData(resp.series[lineKey] || []);
+    clearOscillatorPriceLines();
+    Object.values(resp.thresholds || {}).forEach(value => {
+      oscillatorPriceLines.push(previewOscillatorSeries.createPriceLine({
+        price: value, color: cssVar('--pending'), lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
+      }));
+    });
+  }
+}
 
 function applyChartTheme() {
   chart.applyOptions({
@@ -569,6 +639,9 @@ function applyChartTheme() {
     borderUpColor: cssVar('--done'), borderDownColor: cssVar('--failed'),
     wickUpColor: cssVar('--done'), wickDownColor: cssVar('--failed'),
   });
+  previewUpperSeries.applyOptions({ color: cssVar('--accent') });
+  previewLowerSeries.applyOptions({ color: cssVar('--accent') });
+  previewOscillatorSeries.applyOptions({ color: cssVar('--accent') });
 }
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyChartTheme);
 
@@ -691,6 +764,7 @@ const strategyNameInput = document.getElementById('strategyNameInput');
 const strategyParamsForm = document.getElementById('strategyParamsForm');
 const strategyEditPanel = document.getElementById('strategyEditPanel');
 const strategyMsg = document.getElementById('strategyMsg');
+const previewHint = document.getElementById('previewHint');
 const backtestResultPanel = document.getElementById('backtestResultPanel');
 const backtestKv = document.getElementById('backtestKv');
 const btnRunBacktest = document.getElementById('btnRunBacktest');
@@ -747,6 +821,47 @@ function readParamForm(meta) {
   });
   return out;
 }
+
+// Живое превью параметров на графике (как настройка индикатора в
+// TradingView): пока открыта форма редактирования, канал/осциллятор на
+// графике выше пересчитывается на бэкенде (те же indicators.py, что и в
+// бэктесте) при каждой правке поля, с debounce, чтобы не долбить сервер
+// на каждый символ ввода.
+let previewDebounceTimer = null;
+function scheduleRefreshPreview() {
+  clearTimeout(previewDebounceTimer);
+  previewDebounceTimer = setTimeout(refreshStrategyPreview, 350);
+}
+
+async function refreshStrategyPreview() {
+  const key = strategyTypeSelect.value;
+  const meta = strategyTypes[key];
+  if (!meta) return;
+  let params;
+  try {
+    params = readParamForm(meta);
+  } catch (e) {
+    clearStrategyPreview();
+    return;
+  }
+  const tf = params.tf || '15m';
+  if (tf !== '15m') {
+    clearStrategyPreview();
+    previewHint.textContent = `Превью на графике недоступно: таймфрейм стратегии (${tf}) не совпадает с графиком (15m).`;
+    previewHint.style.display = 'block';
+    return;
+  }
+  previewHint.style.display = 'none';
+  try {
+    const j = await postJson('/strategies/preview', 'POST', { strategy_key: key, params, symbol: sym, limit: 300 });
+    applyStrategyPreview(j);
+  } catch (e) {
+    clearStrategyPreview();
+  }
+}
+
+strategyParamsForm.addEventListener('input', scheduleRefreshPreview);
+strategyParamsForm.addEventListener('change', scheduleRefreshPreview);
 
 async function loadStrategyTypes() {
   const r = await fetch('/strategies/types');
@@ -822,15 +937,19 @@ function openStrategyEditPanel(configId) {
     renderParamForm(strategyTypes[cfg.strategy_key], cfg.params);
   }
   strategyEditPanel.style.display = 'block';
+  refreshStrategyPreview();
 }
 
 document.getElementById('btnNewStrategy').onclick = () => openStrategyEditPanel(null);
 document.getElementById('btnCancelStrategy').onclick = () => {
   strategyEditPanel.style.display = 'none';
   editingConfigId = null;
+  previewHint.style.display = 'none';
+  clearStrategyPreview();
 };
 strategyTypeSelect.onchange = () => {
   if (!strategyTypeSelect.disabled) renderParamForm(strategyTypes[strategyTypeSelect.value], {});
+  refreshStrategyPreview();
 };
 
 document.getElementById('btnSaveStrategy').onclick = async () => {

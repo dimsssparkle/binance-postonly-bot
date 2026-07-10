@@ -85,3 +85,10 @@ class BacktestRunPayload(BaseModel):
         if has_config == has_adhoc:
             raise ValueError("укажите ровно одно из: config_id ИЛИ strategy_key")
         return self
+
+
+class StrategyPreviewPayload(BaseModel):
+    strategy_key: str
+    params: dict[str, Any] = {}
+    symbol: str = "ETHUSDT"
+    limit: int = 300

@@ -13,12 +13,15 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.api.schemas import (
     BacktestRunPayload, EnabledPayload, StrategyConfigCreatePayload, StrategyConfigUpdatePayload,
+    StrategyPreviewPayload,
 )
+from app.backtest.candle import Candle
 from app.backtest.data import get_history
 from app.backtest.engine import BacktestConfig, BacktestEngine
 from app.backtest.report import build_report
 from app.strategy.base import Strategy
 from app.strategy.params import ParamType, validate_params
+from app.strategy.preview import compute_preview
 from app.strategy.registry import STRATEGY_REGISTRY, StrategyMeta, build_strategy
 
 log = logging.getLogger("api.strategies")
@@ -197,5 +200,41 @@ async def run_strategy_backtest(payload: BacktestRunPayload, request: Request):
     try:
         return await asyncio.to_thread(
             _run_backtest_sync, rest, strategy_key, clean_params, payload, sub_strategies)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+_PREVIEW_WARMUP_MARGIN = 250  # запас баров ДО показанного окна на разогрев индикатора
+
+
+def _run_preview_sync(rest, strategy_key: str, params: dict, symbol: str, limit: int) -> dict:
+    """Блокирующая часть (запрос свечей + расчёт индикатора) — через
+    asyncio.to_thread, как и бэктест. В ОТЛИЧИЕ от бэктеста (get_history,
+    статический дисковый кэш backtest_data/ на годы истории) — здесь нужны
+    ЖИВЫЕ свечи с биржи, тем же вызовом, что и /candles для самого графика
+    (rest.get_klines). Иначе превью показывало бы данные на момент последней
+    докачки backtest_data/, а не то же окно времени, что видно на графике —
+    линии индикатора и свечи просто не пересекались бы по времени."""
+    tf = params.get("tf", "15m")
+    raw = rest.get_klines(symbol, tf, limit=limit + _PREVIEW_WARMUP_MARGIN)
+    if not raw:
+        raise ValueError(f"не удалось получить историю {symbol} {tf} с биржи")
+    candles = [Candle.from_binance_kline(k) for k in raw]
+    return compute_preview(strategy_key, params, candles, limit)
+
+
+@router.post("/strategies/preview")
+async def preview_strategy_indicator(payload: StrategyPreviewPayload, request: Request):
+    if payload.strategy_key not in STRATEGY_REGISTRY:
+        raise HTTPException(status_code=400, detail=f"неизвестная стратегия: {payload.strategy_key}")
+    try:
+        clean_params = validate_params(STRATEGY_REGISTRY[payload.strategy_key].params, payload.params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    rest = request.app.state.rest
+    try:
+        return await asyncio.to_thread(
+            _run_preview_sync, rest, payload.strategy_key, clean_params, payload.symbol, payload.limit)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
